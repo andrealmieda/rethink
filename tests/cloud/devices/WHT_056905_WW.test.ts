@@ -73,7 +73,7 @@ describe(MODEL_ID, () => {
 
         assert.ok(components.water_heater, 'water_heater component')
         assert.equal(components.water_heater.platform, 'water_heater')
-        assert.deepEqual(components.water_heater.modes, ['eco', 'heat_pump', 'performance', 'vacation'])
+        assert.deepEqual(components.water_heater.modes, ['heat_pump', 'eco', 'performance', 'vacation'])
         assert.equal(components.water_heater.temperature_unit, 'C')
 
         dev.drop()
@@ -87,13 +87,13 @@ describe(MODEL_ID, () => {
 
         assert.equal(ha.getProperty(DEVICE_ID, 'water_heater', 'current_temperature'), 59) // 0x255=118 /2
         assert.equal(ha.getProperty(DEVICE_ID, 'water_heater', 'temperature_state'), 52) // 0x256=104 /2
-        assert.equal(ha.getProperty(DEVICE_ID, 'water_heater', 'mode_state'), 'heat_pump') // 0x1f9=26
-        assert.equal(ha.devices[DEVICE_ID].properties['heating-'], 'OFF') // 0x188=1 idle
+        assert.equal(ha.getProperty(DEVICE_ID, 'water_heater', 'mode_state'), 'eco') // 0x1f9=26 = LG Auto
+        assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'idle') // 0x2b3=0
 
         dev.drop()
     })
 
-    test('heating-cycle dump reports power and Heating=ON', (t) => {
+    test('heating-cycle dump reports power and Status=heating', (t) => {
         const { ha, thinq, dev } = buildReadyDevice(t)
 
         // Real dump captured mid-heating: 0x2b3=1978 W, 0x188=3.
@@ -104,21 +104,32 @@ describe(MODEL_ID, () => {
         tickMockTimers(t, 1000)
 
         assert.equal(ha.getProperty(DEVICE_ID, 'power_w', 'state'), 1978) // 0x2b3
-        assert.equal(ha.devices[DEVICE_ID].properties['heating-'], 'ON') // 0x188=3
+        assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'heating')
 
         dev.drop()
     })
 
-    test('power draw alone flips Heating ON (0x188 still idle)', (t) => {
+    test('Status: power draw drives idle -> standby -> heating', (t) => {
         const { ha, thinq, dev } = buildReadyDevice(t)
-        assert.equal(ha.devices[DEVICE_ID].properties['heating-'], 'OFF') // idle baseline
+        assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'idle') // baseline 0 W
 
-        // Real single-tag notification: 0x2b3 = 65 W (compressor starting), 0x188 still 1.
+        // Real single-tag notification: 0x2b3 = 65 W (compressor running) -> heating.
         thinq.emit('data', buf('000004000000A70204FF03ACD0416E2B'))
         tickMockTimers(t, 1000)
 
         assert.equal(ha.getProperty(DEVICE_ID, 'power_w', 'state'), 65)
-        assert.equal(ha.devices[DEVICE_ID].properties['heating-'], 'ON') // driven by power, not 0x188
+        assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'heating') // 65 W >= 40
+
+        // Real vacation/standby dump: 0x2b3 = 17 W -> standby, not heating.
+        thinq.emit(
+            'data',
+            buf(
+                '000004000000A70204D1337E501C7DC195506B95906CA2407F0088408A008A502F8A808CA0023D8CD018ACD011D5600CF2D5A010E0C90062017B906457403AA3',
+            ),
+        )
+        tickMockTimers(t, 1000)
+        assert.equal(ha.getProperty(DEVICE_ID, 'power_w', 'state'), 17)
+        assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'standby') // 0 < 17 < 40
 
         dev.drop()
     })

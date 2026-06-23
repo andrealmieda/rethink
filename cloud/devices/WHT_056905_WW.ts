@@ -32,9 +32,9 @@ import HADevice from './base'
  *                                      so this is a local-protocol advantage.
  *                                      Capture during a heating cycle to confirm
  *                                      and to find any dedicated compressor flag.
- *   0x188  run state enum    OPAQUE     1=idle; 3 and 5 both seen while running
- *                                      (~1978 W, ~312 W) — not used; Heating is
- *                                      derived from 0x2b3 power instead
+ *   0x188  run state         CONFIRMED  1=not running (idle/standby); 3 and 5 both
+ *                                      seen running (~1978 W, ~312 W). Feeds Status
+ *                                      (with 0x2b3 power for faster updates)
  *   0x1ee  hot-water %?      HYPOTHESIS 100 full/idle, drops while charging (30-60)
  *   0x355  slow counter     UNKNOWN    drifts down over hours
  *   0x281  =3               IGNORE     periodic heartbeat, not user state
@@ -58,13 +58,13 @@ import HADevice from './base'
 //   LG VACATION  -> 'vacation'     (custom; official integration omits it)
 //
 // Numeric TLV codes (rethink-local; the cloud API uses the strings above).
-// CONFIRMED on hardware via HA mode-change round-trips: 25 == eco, 26 == heat_pump,
-// 28 == vacation (each command wrote 0x1f9=<code> and the device switched to and
-// reported that mode). 27 == performance by elimination — caps enumerates exactly
-// {25,26,27,28} and the other three are pinned.
+// CONFIRMED against the LG app's mode display: code 25 = LG "Heat Pump", 26 = LG
+// "Auto", 28 = "Vacation" (27 = "Turbo" by elimination — caps enumerates exactly
+// {25,26,27,28}). We present each with the HA-standard state the official lg_thinq
+// integration uses (LG Auto -> eco, Heat Pump -> heat_pump, Turbo -> performance).
 const MODE_R2H: Record<number, string> = {
-    25: 'eco', // LG "Auto"
-    26: 'heat_pump', // LG "Heat Pump"
+    25: 'heat_pump', // LG "Heat Pump"
+    26: 'eco', // LG "Auto"
     27: 'performance', // LG "Turbo"
     28: 'vacation', // LG "Vacation"
 }
@@ -165,7 +165,7 @@ export default class Device extends TLVDevice {
         })
 
         // Compressor power draw — confirmed at ~1978 W during a heating cycle, 0 idle.
-        // read_callback recomputes the Heating sensor whenever power changes.
+        // read_callback recomputes the Status sensor whenever power changes.
         const powerComp = {
             platform: 'sensor',
             unique_id: '$deviceid-power_w',
@@ -183,33 +183,58 @@ export default class Device extends TLVDevice {
             comp: 'power_w',
             writable: false,
             read_callback: () => {
-                this.updateHeating()
+                this.updateStatus()
                 return true // also publish the W value normally
             },
         })
 
-        // Heating / compressor-running binary_sensor, derived purely from power draw
-        // (recomputed by the 0x2b3 read_callback above). The run-state tag 0x188 is an
-        // opaque enum — observed 1 (idle), 3 and 5 (both running, at ~1978 W and
-        // ~312 W) — so it can't distinguish running from idle reliably; a nonzero
-        // 0x2b3 can. The LG cloud integration can't report this at all (HA #160012).
-        const heatingComp = {
-            platform: 'binary_sensor',
-            unique_id: '$deviceid-heating',
-            name: 'Heating',
-            device_class: 'running',
+        // Operation Status, synthesised from power draw. The device's own run-state
+        // tag (0x188) is an opaque enum (1 idle; 3 and 5 both seen while running), and
+        // the LG app only reports a coarse "running" that stays on in standby — so we
+        // derive a clear status from the measured power instead, using the gap between
+        // standby (~17 W) and the compressor (65-317 W). The LG cloud integration can't
+        // report run state at all (HA #160012).
+        const statusComp = {
+            platform: 'sensor',
+            unique_id: '$deviceid-status',
+            name: 'Status',
+            device_class: 'enum',
+            options: ['idle', 'standby', 'heating'],
+            icon: 'mdi:heat-pump',
             entity_category: 'diagnostic',
-            state_topic: '$this/heating-',
+            state_topic: '$this/status-',
         }
-        config['components']['heating'] = heatingComp
+        config['components']['status'] = statusComp
+        // 0x188 (device run-state) recomputes Status whenever a full dump arrives.
+        this.addField(
+            config,
+            {
+                id: 0x188,
+                name: '',
+                comp: 'status',
+                readable: false,
+                writable: false,
+                read_callback: () => {
+                    this.updateStatus()
+                    return false
+                },
+            },
+            false,
+        )
 
         this.setConfig(config)
     }
 
-    // Publish the Heating sensor from the latest power draw.
-    updateHeating() {
-        const on = (this.raw_clip_state[0x2b3] ?? 0) > 0
-        this.HA.publishProperty(this.id, 'heating-', on ? 'ON' : 'OFF')
+    // Publish the operation Status. 0x188 is the device's run-state field (1 = not
+    // running; 3/5 = compressor running) — authoritative, but only sent in full dumps
+    // (~every 15 min), so power draw (0x2b3, sent ~every 60 s) corroborates it for a
+    // fast response. Bands: idle 0 W / standby ~17 W / heating 65-317 W.
+    updateStatus() {
+        const run = this.raw_clip_state[0x188]
+        const w = this.raw_clip_state[0x2b3] ?? 0
+        const heating = run === 3 || run === 5 || w >= 40
+        const status = heating ? 'heating' : w > 0 ? 'standby' : 'idle'
+        this.HA.publishProperty(this.id, 'status-', status)
     }
 
     addSensor(
