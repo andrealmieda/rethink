@@ -4,7 +4,7 @@
 import { generateDeployResponse } from './provisioning'
 import { TypedEmitter } from 'tiny-typed-emitter'
 import { Client, PublishPacket, type Broker } from '../mqtt-broker'
-import { ClipDeployMessage, ClipMessage } from './clip'
+import { ClipDeployMessage, ClipMessage, DeployPayload } from './clip'
 
 import log from '@/util/logging'
 import { Metadata } from '../thinq'
@@ -18,6 +18,10 @@ type DeviceEvents = {
 export class Device extends TypedEmitter<DeviceEvents> {
     // this could be a stream but why bother...
     readonly platform = 'thinq2'
+
+    // the real provisioning profile the device reported (appInfo/platformInfo),
+    // used by the bridge so the LG cloud sees the genuine device (protocolVer etc.)
+    deployData?: DeployPayload
 
     constructor(
         readonly broker: Broker,
@@ -147,6 +151,7 @@ export class DeviceAcceptor extends TypedEmitter<DeviceAcceptorEvents> {
         }
 
         const dev = new Device(this.broker, 'lime/devices/' + deviceId, deviceId, meta)
+        dev.deployData = client.deployMsg.data
         client.deviceObj = dev
         this.emit('newDevice', dev)
     }

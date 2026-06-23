@@ -24,8 +24,16 @@ export type DeployPayload = {
         svcCode: string
         HomeApSsid: string
         DeviceType: string
+        protocolVer?: string
         // and some other fields yadda yadda
+        [key: string]: unknown
     }
+    platformInfo?: {
+        provisioningKey?: string
+        version?: string
+        [key: string]: unknown
+    }
+    [key: string]: unknown
 }
 
 export type ClipDeployMessage = ClipMessage<'preDeploy' | 'deploy', DeployPayload>

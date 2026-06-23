@@ -2,6 +2,7 @@ import * as mqtt from 'mqtt'
 import { Thinq2Device } from './thinqApi'
 import { TypedEmitter } from 'tiny-typed-emitter'
 import log from '@/util/logging'
+import { DeployPayload } from '@/cloud/thinq2/clip'
 
 type ConnectionEvents = {
     data: (buffer: Buffer) => void
@@ -13,7 +14,10 @@ export class Connection extends TypedEmitter<ConnectionEvents> {
     mqtt: mqtt.MqttClient
     mid = 10000
 
-    constructor(readonly device: Thinq2Device) {
+    constructor(
+        readonly device: Thinq2Device,
+        readonly deployData?: DeployPayload,
+    ) {
         super()
         const state = this.device.state!
         log('bridge', `${this.device.deviceId} connecting to ${state.mqttServer}`)
@@ -59,6 +63,38 @@ export class Connection extends TypedEmitter<ConnectionEvents> {
         this.mqtt.on('connect', async () => {
             log('bridge', `${this.device.deviceId} connected`)
             await this.mqtt.subscribe(this.device.state!.subTopic)
+
+            // Prefer the real profile the device reported downstream (correct
+            // protocolVer, modemType, DeviceType, ...) so the cloud recognises the
+            // device and will route control commands. Fall back to generic values
+            // (originally tuned for an AC) only when we have no deploy data.
+            const real = this.deployData
+            const appInfo = real?.appInfo ?? {
+                modelName: this.device.meta.modelName,
+                modelLanguage: this.device.state!.countryCode,
+                softVer: '690409',
+                ruleVer: '2.0.11',
+                countryCode: this.device.state!.countryCode,
+                subCountryCode: this.device.state!.countryCode,
+                appVersion: 'clip_hna_v1.9.183',
+                modemType: 'RTK_RTL8711am',
+                regionalCode: 'eic',
+                timezone: '+0100',
+                svcCode: 'SVC202',
+                HomeApSsid: 'whatever',
+                DeviceType: '',
+                ruleEngine: 'y',
+                protocolVer: '1',
+                oneshot: 'y',
+                size: 1572864,
+                fwUpgradeInfo: { upgSched: { cmd: 'none', upgUtc: '0' } },
+            }
+            const platformInfo = real?.platformInfo ?? {
+                provisioningKey: this.device.meta.modelName,
+                version: 'clip_v2.00.15.05-RTK_RTL8711am-SDK-8-RELEASE',
+            }
+
+            log('bridge', `${this.device.deviceId} announcing (protocolVer ${(appInfo as any).protocolVer})`)
             await this.mqtt.publish(
                 this.device.state!.provTopic,
                 JSON.stringify({
@@ -68,37 +104,7 @@ export class Connection extends TypedEmitter<ConnectionEvents> {
                     cmd: 'preDeploy',
                     rssi: -48,
                     fs: 'idle',
-                    data: {
-                        appInfo: {
-                            modelName: this.device.meta.modelName,
-                            modelLanguage: this.device.state!.countryCode,
-                            softVer: '690409',
-                            ruleVer: '2.0.11',
-                            countryCode: this.device.state!.countryCode,
-                            subCountryCode: this.device.state!.countryCode,
-                            appVersion: 'clip_hna_v1.9.183',
-                            modemType: 'RTK_RTL8711am',
-                            regionalCode: 'eic',
-                            timezone: '+0100',
-                            svcCode: 'SVC202',
-                            HomeApSsid: 'whatever',
-                            DeviceType: '',
-                            ruleEngine: 'y',
-                            protocolVer: '1',
-                            oneshot: 'y',
-                            size: 1572864,
-                            fwUpgradeInfo: {
-                                upgSched: {
-                                    cmd: 'none',
-                                    upgUtc: '0',
-                                },
-                            },
-                        },
-                        platformInfo: {
-                            provisioningKey: this.device.meta.modelName,
-                            version: 'clip_v2.00.15.05-RTK_RTL8711am-SDK-8-RELEASE',
-                        },
-                    },
+                    data: { appInfo, platformInfo },
                     type: 0,
                 }),
                 { qos: 1 },
