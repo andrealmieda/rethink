@@ -32,8 +32,10 @@ import HADevice from './base'
  *                                      so this is a local-protocol advantage.
  *                                      Capture during a heating cycle to confirm
  *                                      and to find any dedicated compressor flag.
- *   0x188  run state        CONFIRMED  1=idle/standby, 3=heating (-> Heating sensor)
- *   0x1ee  hot-water %?      HYPOTHESIS 100 idle, 0 while heating
+ *   0x188  run state enum    OPAQUE     1=idle; 3 and 5 both seen while running
+ *                                      (~1978 W, ~312 W) — not used; Heating is
+ *                                      derived from 0x2b3 power instead
+ *   0x1ee  hot-water %?      HYPOTHESIS 100 full/idle, drops while charging (30-60)
  *   0x355  slow counter     UNKNOWN    drifts down over hours
  *   0x281  =3               IGNORE     periodic heartbeat, not user state
  *
@@ -186,11 +188,12 @@ export default class Device extends TLVDevice {
             },
         })
 
-        // Heating / compressor-running binary_sensor. The compressor draws power
-        // (0x2b3) well before the run-state tag 0x188 flips to 3, so power draw is the
-        // primary signal; 0x188===3 is a fallback. The LG cloud integration can't
-        // report this at all (HA issue #160012). 0x188 only feeds the computation.
-        const heating = {
+        // Heating / compressor-running binary_sensor, derived purely from power draw
+        // (recomputed by the 0x2b3 read_callback above). The run-state tag 0x188 is an
+        // opaque enum — observed 1 (idle), 3 and 5 (both running, at ~1978 W and
+        // ~312 W) — so it can't distinguish running from idle reliably; a nonzero
+        // 0x2b3 can. The LG cloud integration can't report this at all (HA #160012).
+        const heatingComp = {
             platform: 'binary_sensor',
             unique_id: '$deviceid-heating',
             name: 'Heating',
@@ -198,29 +201,14 @@ export default class Device extends TLVDevice {
             entity_category: 'diagnostic',
             state_topic: '$this/heating-',
         }
-        config['components']['heating'] = heating
-        this.addField(
-            config,
-            {
-                id: 0x188,
-                name: '',
-                comp: 'heating',
-                readable: false,
-                writable: false,
-                read_callback: () => {
-                    this.updateHeating()
-                    return false
-                },
-            },
-            false,
-        )
+        config['components']['heating'] = heatingComp
 
         this.setConfig(config)
     }
 
-    // Publish the Heating sensor from the latest power draw / run state.
+    // Publish the Heating sensor from the latest power draw.
     updateHeating() {
-        const on = (this.raw_clip_state[0x2b3] ?? 0) > 0 || this.raw_clip_state[0x188] === 3
+        const on = (this.raw_clip_state[0x2b3] ?? 0) > 0
         this.HA.publishProperty(this.id, 'heating-', on ? 'ON' : 'OFF')
     }
 
