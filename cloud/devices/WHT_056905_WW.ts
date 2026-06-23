@@ -55,11 +55,11 @@ import HADevice from './base'
 //   LG TURBO     -> 'performance'  (-> STATE_PERFORMANCE)
 //   LG VACATION  -> 'vacation'     (custom; official integration omits it)
 //
-// Numeric TLV codes (rethink-local; the cloud API uses the strings above):
-//   28 == vacation is CONFIRMED (device left on vacation reports 0x1f9=28).
-//   25/26/27 follow LG's stated UI order "Auto, Heat Pump, Turbo, Vacation",
-//   and the captured resting default 0x1f9=26 == heat_pump is consistent.
-//   TODO: confirm 25 (auto/eco) vs 26 (heat_pump) by selecting each in the app.
+// Numeric TLV codes (rethink-local; the cloud API uses the strings above).
+// CONFIRMED on hardware via HA mode-change round-trips: 25 == eco, 26 == heat_pump,
+// 28 == vacation (each command wrote 0x1f9=<code> and the device switched to and
+// reported that mode). 27 == performance by elimination — caps enumerates exactly
+// {25,26,27,28} and the other three are pinned.
 const MODE_R2H: Record<number, string> = {
     25: 'eco', // LG "Auto"
     26: 'heat_pump', // LG "Heat Pump"
