@@ -35,7 +35,8 @@ import HADevice from './base'
  *   0x188  run state         CONFIRMED  1=not running (idle/standby); 3 and 5 both
  *                                      seen running (~1978 W, ~312 W). Feeds Status
  *                                      (with 0x2b3 power for faster updates)
- *   0x1ee  hot-water %?      HYPOTHESIS 100 full/idle, drops while charging (30-60)
+ *   0x1ee  hot-water %       CONFIRMED  matches the LG app gauge; 100 full/idle,
+ *                                      drops while charging
  *   0x355  slow counter     UNKNOWN    drifts down over hours
  *   0x281  =3               IGNORE     periodic heartbeat, not user state
  *
@@ -155,9 +156,8 @@ export default class Device extends TLVDevice {
 
         this.addSensor(config, 0x221, 'error', 'Error code', 'mdi:alert')
 
-        // Hot-water available (0x1ee): ~100 when full/idle, drops while reheating,
-        // 0 when depleted. Matches the LG app's tank gauge (e.g. "2/3"). HYPOTHESIS —
-        // verify the % against the app's level indicator.
+        // Hot-water available (0x1ee): ~100 when full/idle, drops while reheating.
+        // Confirmed to track the LG app's tank gauge.
         this.addSensor(config, 0x1ee, 'hot_water', 'Hot water', 'mdi:water-percent', {
             unit_of_measurement: '%',
             state_class: 'measurement',
