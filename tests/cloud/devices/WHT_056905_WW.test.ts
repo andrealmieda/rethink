@@ -89,6 +89,8 @@ describe(MODEL_ID, () => {
         assert.equal(ha.getProperty(DEVICE_ID, 'water_heater', 'temperature_state'), 52) // 0x256=104 /2
         assert.equal(ha.getProperty(DEVICE_ID, 'water_heater', 'mode_state'), 'eco') // 0x1f9=26 = LG Auto
         assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'idle') // 0x2b3=0
+        assert.equal(ha.getProperty(DEVICE_ID, 'run_state', 'state'), 1) // 0x188 raw
+        assert.equal(ha.getProperty(DEVICE_ID, 'dbg_355', 'state'), 3367) // raw debug tag
 
         dev.drop()
     })

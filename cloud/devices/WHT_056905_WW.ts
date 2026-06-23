@@ -205,22 +205,46 @@ export default class Device extends TLVDevice {
             state_topic: '$this/status-',
         }
         config['components']['status'] = statusComp
-        // 0x188 (device run-state) recomputes Status whenever a full dump arrives.
-        this.addField(
-            config,
-            {
-                id: 0x188,
-                name: '',
-                comp: 'status',
-                readable: false,
-                writable: false,
-                read_callback: () => {
-                    this.updateStatus()
-                    return false
-                },
+
+        // Device run-state (0x188): 1 = not running, 3/5 = running. Exposed raw for
+        // debugging, and recomputes Status whenever a full dump arrives.
+        const runStateComp = {
+            platform: 'sensor',
+            unique_id: '$deviceid-run_state',
+            name: 'Run state',
+            icon: 'mdi:state-machine',
+            entity_category: 'diagnostic',
+            state_class: 'measurement',
+        }
+        config['components']['run_state'] = runStateComp
+        this.addField(config, {
+            id: 0x188,
+            name: '',
+            comp: 'run_state',
+            writable: false,
+            read_callback: () => {
+                this.updateStatus()
+                return true // also publish the raw run-state value
             },
-            false,
-        )
+        })
+
+        // --- Raw sensors for still-undecoded tags, to debug them further in HA. ---
+        // These are diagnostic and may be trimmed before an upstream PR.
+        const DEBUG_TAGS: [number, string][] = [
+            [0x228, '228'], // changes during heating (5/7/8/9)
+            [0x22a, '22a'], // changes during heating
+            [0x232, '232'], // variable
+            [0x233, '233'], // variable
+            [0x355, '355'], // slow counter, drifts down
+            [0x356, '356'], // ~constant 4320
+            [0x289, '289'], // flag (mostly 0)
+            [0x1fc, '1fc'], // flag (mostly 0)
+            [0x324, '324'], // flag (mostly 0)
+            [0x15d, '15d'], // flag (mostly 0)
+        ]
+        for (const [id, hex] of DEBUG_TAGS) {
+            this.addSensor(config, id, 'dbg_' + hex, 'Debug 0x' + hex, 'mdi:bug', { state_class: 'measurement' })
+        }
 
         this.setConfig(config)
     }
