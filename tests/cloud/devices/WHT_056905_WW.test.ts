@@ -109,6 +109,20 @@ describe(MODEL_ID, () => {
         dev.drop()
     })
 
+    test('power draw alone flips Heating ON (0x188 still idle)', (t) => {
+        const { ha, thinq, dev } = buildReadyDevice(t)
+        assert.equal(ha.devices[DEVICE_ID].properties['heating-'], 'OFF') // idle baseline
+
+        // Real single-tag notification: 0x2b3 = 65 W (compressor starting), 0x188 still 1.
+        thinq.emit('data', buf('000004000000A70204FF03ACD0416E2B'))
+        tickMockTimers(t, 1000)
+
+        assert.equal(ha.getProperty(DEVICE_ID, 'power_w', 'state'), 65)
+        assert.equal(ha.devices[DEVICE_ID].properties['heating-'], 'ON') // driven by power, not 0x188
+
+        dev.drop()
+    })
+
     test('setting temperature writes 0x256 (2 x °C)', (t) => {
         const { ha, thinq, dev } = buildReadyDevice(t)
 

@@ -153,16 +153,43 @@ export default class Device extends TLVDevice {
 
         this.addSensor(config, 0x221, 'error', 'Error code', 'mdi:alert')
 
-        // Compressor power draw — confirmed at ~1978 W during a heating cycle, 0 idle.
-        this.addSensor(config, 0x2b3, 'power_w', 'Power', undefined, {
-            device_class: 'power',
-            unit_of_measurement: 'W',
+        // Hot-water available (0x1ee): ~100 when full/idle, drops while reheating,
+        // 0 when depleted. Matches the LG app's tank gauge (e.g. "2/3"). HYPOTHESIS —
+        // verify the % against the app's level indicator.
+        this.addSensor(config, 0x1ee, 'hot_water', 'Hot water', 'mdi:water-percent', {
+            unit_of_measurement: '%',
             state_class: 'measurement',
             suggested_display_precision: 0,
         })
 
-        // Run state (0x188): 1 = idle/standby, 3 = heating. Exposed as a running
-        // binary_sensor — the LG cloud integration can't report this (HA issue #160012).
+        // Compressor power draw — confirmed at ~1978 W during a heating cycle, 0 idle.
+        // read_callback recomputes the Heating sensor whenever power changes.
+        const powerComp = {
+            platform: 'sensor',
+            unique_id: '$deviceid-power_w',
+            name: 'Power',
+            entity_category: 'diagnostic',
+            device_class: 'power',
+            unit_of_measurement: 'W',
+            state_class: 'measurement',
+            suggested_display_precision: 0,
+        }
+        config['components']['power_w'] = powerComp
+        this.addField(config, {
+            id: 0x2b3,
+            name: '',
+            comp: 'power_w',
+            writable: false,
+            read_callback: () => {
+                this.updateHeating()
+                return true // also publish the W value normally
+            },
+        })
+
+        // Heating / compressor-running binary_sensor. The compressor draws power
+        // (0x2b3) well before the run-state tag 0x188 flips to 3, so power draw is the
+        // primary signal; 0x188===3 is a fallback. The LG cloud integration can't
+        // report this at all (HA issue #160012). 0x188 only feeds the computation.
         const heating = {
             platform: 'binary_sensor',
             unique_id: '$deviceid-heating',
@@ -172,15 +199,29 @@ export default class Device extends TLVDevice {
             state_topic: '$this/heating-',
         }
         config['components']['heating'] = heating
-        this.addField(config, {
-            id: 0x188,
-            name: '',
-            comp: 'heating',
-            writable: false,
-            read_xform: (raw) => (raw === 3 ? 'ON' : 'OFF'),
-        })
+        this.addField(
+            config,
+            {
+                id: 0x188,
+                name: '',
+                comp: 'heating',
+                readable: false,
+                writable: false,
+                read_callback: () => {
+                    this.updateHeating()
+                    return false
+                },
+            },
+            false,
+        )
 
         this.setConfig(config)
+    }
+
+    // Publish the Heating sensor from the latest power draw / run state.
+    updateHeating() {
+        const on = (this.raw_clip_state[0x2b3] ?? 0) > 0 || this.raw_clip_state[0x188] === 3
+        this.HA.publishProperty(this.id, 'heating-', on ? 'ON' : 'OFF')
     }
 
     addSensor(
