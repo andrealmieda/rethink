@@ -90,7 +90,25 @@ describe(MODEL_ID, () => {
         assert.equal(ha.getProperty(DEVICE_ID, 'water_heater', 'mode_state'), 'eco') // 0x1f9=26 = LG Auto
         assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'idle') // 0x2b3=0
         assert.equal(ha.getProperty(DEVICE_ID, 'run_state', 'state'), 1) // 0x188 raw
-        assert.equal(ha.getProperty(DEVICE_ID, 'dbg_355', 'state'), 3367) // raw debug tag
+        assert.equal(ha.getProperty(DEVICE_ID, 'filter_life', 'state'), 78) // 0x355 3367 / 0x356 4320
+
+        dev.drop()
+    })
+
+    test('A8 66 telemetry frame publishes compressor freq and coil temps', (t) => {
+        const { ha, thinq, dev } = buildReadyDevice(t)
+
+        // Real A8 66 frame captured mid-heating: active block 02 00 27 … (freq 0x27=39),
+        // temp bank … 01C7 01E5 … (coil1 45.5 °C, coil2 48.5 °C).
+        const A866_HEX =
+            '000004000000A8662E01740A010F2E3002002727026202620007011A01000101' +
+            'FD00001E12030001F401C701E5025800F70003EB0003EB0000000003EB5748323753545232'
+        thinq.emit('data', buf(A866_HEX))
+        tickMockTimers(t, 1000)
+
+        assert.equal(ha.getProperty(DEVICE_ID, 'compressor_freq', 'state'), 39)
+        assert.equal(ha.getProperty(DEVICE_ID, 'coil_temp1', 'state'), 45.5)
+        assert.equal(ha.getProperty(DEVICE_ID, 'coil_temp2', 'state'), 48.5)
 
         dev.drop()
     })

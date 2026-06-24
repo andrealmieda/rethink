@@ -164,6 +164,22 @@ export default class Device extends TLVDevice {
             suggested_display_precision: 0,
         })
 
+        // Air-filter life remaining %: 0x356 = total hours (4320 ≈ 180 days), 0x355 =
+        // remaining. Confirmed: the A8 66 telemetry "used" counter == 0x356 - 0x355.
+        this.addSensor(
+            config,
+            0x355,
+            'filter_life',
+            'Filter life',
+            'mdi:air-filter',
+            {
+                unit_of_measurement: '%',
+                state_class: 'measurement',
+                suggested_display_precision: 0,
+            },
+            (raw) => Math.round((raw / ((this.raw_clip_state[0x356] as number) || 4320)) * 100),
+        )
+
         // Compressor power draw — confirmed at ~1978 W during a heating cycle, 0 idle.
         // read_callback recomputes the Status sensor whenever power changes.
         const powerComp = {
@@ -235,8 +251,6 @@ export default class Device extends TLVDevice {
             [0x22a, '22a'], // changes during heating
             [0x232, '232'], // variable
             [0x233, '233'], // variable
-            [0x355, '355'], // slow counter, drifts down
-            [0x356, '356'], // ~constant 4320
             [0x289, '289'], // flag (mostly 0)
             [0x1fc, '1fc'], // flag (mostly 0)
             [0x324, '324'], // flag (mostly 0)
@@ -244,6 +258,53 @@ export default class Device extends TLVDevice {
         ]
         for (const [id, hex] of DEBUG_TAGS) {
             this.addSensor(config, id, 'dbg_' + hex, 'Debug 0x' + hex, 'mdi:bug', { state_class: 'measurement' })
+        }
+
+        // Sensors fed from the A8 66 service-telemetry frame (decoded in processA866),
+        // which the LG app/cloud don't expose. compressor_freq is 0 when idle; the two
+        // coil temps are refrigerant-circuit readings (exact role unconfirmed).
+        const a866Sensors: [string, string, Record<string, unknown>][] = [
+            [
+                'compressor_freq',
+                'Compressor frequency',
+                {
+                    unit_of_measurement: 'Hz',
+                    device_class: 'frequency',
+                    state_class: 'measurement',
+                    icon: 'mdi:sine-wave',
+                },
+            ],
+            [
+                'coil_temp1',
+                'Coil temperature 1',
+                {
+                    unit_of_measurement: '°C',
+                    device_class: 'temperature',
+                    state_class: 'measurement',
+                    suggested_display_precision: 1,
+                },
+            ],
+            [
+                'coil_temp2',
+                'Coil temperature 2',
+                {
+                    unit_of_measurement: '°C',
+                    device_class: 'temperature',
+                    state_class: 'measurement',
+                    suggested_display_precision: 1,
+                },
+            ],
+        ]
+        for (const [name, desc, extra] of a866Sensors) {
+            const comp = {
+                platform: 'sensor',
+                unique_id: '$deviceid-' + name,
+                name: desc,
+                entity_category: 'diagnostic',
+                state_topic: '$this/' + name + '-',
+                ...extra,
+            }
+            config['components'][name] = comp
         }
 
         this.setConfig(config)
@@ -298,7 +359,30 @@ export default class Device extends TLVDevice {
             this.processTLV(TLV.parse(buf.subarray(11, buf.length - 2)))
             return
         }
+        // A8 66 = periodic service-telemetry frame (not TLV); decode separately.
+        if (buf[6] === 0xa8 && buf[7] === 0x66) {
+            this.processA866(buf)
+            return
+        }
         super.processData(buf)
+    }
+
+    // Decode the A8 66 service-telemetry frame. Layout (verified across captures),
+    // offsets from the start of the framed packet:
+    //   [16..24] active block, zero when idle; when running:
+    //            02 00 <freq> <freq> <aux16> <aux16> 00  (freq in Hz, aux ramps too)
+    //   [39..48] five u16 temperatures x10 °C: water, coil1, coil2, setpoint, ambient
+    //   the "<00 03 XX>" right before the ASCII model string = filter hours used
+    // Guarded by fixed markers so a malformed/short frame is ignored.
+    processA866(buf: Buffer) {
+        const u16 = (i: number) => (buf[i] << 8) | buf[i + 1]
+        if (buf.length < 50 || buf[8] !== 0x2e || buf[25] !== 0x07 || buf[26] !== 0x01) return
+
+        const freq = buf[16] !== 0 ? buf[18] : 0 // active block populated only while running
+        this.HA.publishProperty(this.id, 'compressor_freq-', freq)
+
+        this.HA.publishProperty(this.id, 'coil_temp1-', u16(41) / 10)
+        this.HA.publishProperty(this.id, 'coil_temp2-', u16(43) / 10)
     }
 
     // Capabilities response carries 0x2da (an eeprom checksum, the same tag the AC
