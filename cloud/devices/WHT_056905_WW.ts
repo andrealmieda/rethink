@@ -244,11 +244,36 @@ export default class Device extends TLVDevice {
             },
         })
 
+        // Compressor step (0x228): 0 when off, ramps 1..10 as the compressor spins up
+        // (tracks power/frequency). Decoded from a sustained Auto-mode cycle. Also feeds
+        // Status so it flips to "heating" at startup, before power draw is reported.
+        const stepComp = {
+            platform: 'sensor',
+            unique_id: '$deviceid-compressor_step',
+            name: 'Compressor step',
+            icon: 'mdi:gauge',
+            entity_category: 'diagnostic',
+            state_class: 'measurement',
+        }
+        config['components']['compressor_step'] = stepComp
+        this.addField(config, {
+            id: 0x228,
+            name: '',
+            comp: 'compressor_step',
+            writable: false,
+            read_callback: () => {
+                this.updateStatus()
+                return true
+            },
+        })
+        // Compressor phase (0x22a): 0 off, 1 starting, 2 running (moderate confidence).
+        this.addSensor(config, 0x22a, 'compressor_phase', 'Compressor phase', 'mdi:state-machine', {
+            state_class: 'measurement',
+        })
+
         // --- Raw sensors for still-undecoded tags, to debug them further in HA. ---
         // These are diagnostic and may be trimmed before an upstream PR.
         const DEBUG_TAGS: [number, string][] = [
-            [0x228, '228'], // changes during heating (5/7/8/9)
-            [0x22a, '22a'], // changes during heating
             [0x232, '232'], // variable
             [0x233, '233'], // variable
             [0x289, '289'], // flag (mostly 0)
@@ -274,6 +299,7 @@ export default class Device extends TLVDevice {
                     icon: 'mdi:sine-wave',
                 },
             ],
+            ['fan_speed', 'Fan speed', { state_class: 'measurement', icon: 'mdi:fan' }], // ramps with compressor; rpm? unconfirmed
             [
                 'coil_temp1',
                 'Coil temperature 1',
@@ -316,8 +342,10 @@ export default class Device extends TLVDevice {
     // fast response. Bands: idle 0 W / standby ~17 W / heating 65-317 W.
     updateStatus() {
         const run = this.raw_clip_state[0x188]
+        const step = this.raw_clip_state[0x228] ?? 0
         const w = this.raw_clip_state[0x2b3] ?? 0
-        const heating = run === 3 || run === 5 || w >= 40
+        // compressor step / run-state catch the startup before power draw is reported
+        const heating = run === 3 || run === 5 || step > 0 || w >= 40
         const status = heating ? 'heating' : w > 0 ? 'standby' : 'idle'
         this.HA.publishProperty(this.id, 'status-', status)
     }
@@ -378,8 +406,9 @@ export default class Device extends TLVDevice {
         const u16 = (i: number) => (buf[i] << 8) | buf[i + 1]
         if (buf.length < 50 || buf[8] !== 0x2e || buf[25] !== 0x07 || buf[26] !== 0x01) return
 
-        const freq = buf[16] !== 0 ? buf[18] : 0 // active block populated only while running
-        this.HA.publishProperty(this.id, 'compressor_freq-', freq)
+        const running = buf[16] !== 0 // active block populated only while running
+        this.HA.publishProperty(this.id, 'compressor_freq-', running ? buf[18] : 0)
+        this.HA.publishProperty(this.id, 'fan_speed-', running ? u16(20) : 0)
 
         this.HA.publishProperty(this.id, 'coil_temp1-', u16(41) / 10)
         this.HA.publishProperty(this.id, 'coil_temp2-', u16(43) / 10)

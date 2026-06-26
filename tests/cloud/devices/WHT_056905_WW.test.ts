@@ -75,6 +75,8 @@ describe(MODEL_ID, () => {
         assert.equal(components.water_heater.platform, 'water_heater')
         assert.deepEqual(components.water_heater.modes, ['heat_pump', 'eco', 'performance', 'vacation'])
         assert.equal(components.water_heater.temperature_unit, 'C')
+        for (const c of ['compressor_step', 'compressor_phase', 'compressor_freq', 'fan_speed', 'filter_life'])
+            assert.equal(components[c]?.platform, 'sensor', `${c} component`)
 
         dev.drop()
     })
@@ -95,6 +97,20 @@ describe(MODEL_ID, () => {
         dev.drop()
     })
 
+    test('Status flips to heating on compressor step before power is reported', (t) => {
+        const { ha, dev } = buildReadyDevice(t)
+        assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'idle') // baseline
+
+        // Compressor spinning up: step>0 and run-state 5, but power draw still 0.
+        dev.raw_clip_state[0x2b3] = 0
+        dev.raw_clip_state[0x188] = 5
+        dev.raw_clip_state[0x228] = 4
+        dev.updateStatus()
+        assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'heating')
+
+        dev.drop()
+    })
+
     test('A8 66 telemetry frame publishes compressor freq and coil temps', (t) => {
         const { ha, thinq, dev } = buildReadyDevice(t)
 
@@ -107,6 +123,7 @@ describe(MODEL_ID, () => {
         tickMockTimers(t, 1000)
 
         assert.equal(ha.getProperty(DEVICE_ID, 'compressor_freq', 'state'), 39)
+        assert.equal(ha.getProperty(DEVICE_ID, 'fan_speed', 'state'), 610) // active block u16 0x0262
         assert.equal(ha.getProperty(DEVICE_ID, 'coil_temp1', 'state'), 45.5)
         assert.equal(ha.getProperty(DEVICE_ID, 'coil_temp2', 'state'), 48.5)
 
