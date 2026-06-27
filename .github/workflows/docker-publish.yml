@@ -5,6 +5,7 @@ on:
         branches:
             - master
             - wht-image-build
+            - dw-image-build
     release:
         types:
             - published
@@ -50,6 +51,7 @@ jobs:
                   tags: |
                       type=raw,value=dev,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
                       type=raw,value=wht,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/wht-image-build' }}
+                      type=raw,value=dw,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/dw-image-build' }}
                       type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
                       type=raw,value=latest,enable=${{ github.event_name == 'release' && github.event.release.prerelease == false }}
 
