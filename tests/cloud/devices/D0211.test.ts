@@ -40,6 +40,11 @@ const FINISHING_HEX =
 const DONE_HEX =
     'AA3A32EC001805000000120000000100001C000202010000000000000000001800000000120000000100001C000202010000000000000000CABB'
 
+// Double record: R2=state=1, sub=0, remaining=512 (another sentinel value ≥200 → computes to 0).
+// Used to verify that cycling sentinel values in standby do not cause re-publishes.
+const STANDBY_SENTINEL2_HEX =
+    'AA3A32EC001801000002330300023300001C840202010000000000000000001801000002000700020000001C840202010000000000000000A3BB'
+
 function makeDevice() {
     const ha = new MockHAConnection()
     const thinq = new MockThinq2Device(DEVICE_ID, META)
@@ -145,13 +150,41 @@ describe(MODEL_ID, () => {
     test('duplicate packets do not re-publish unchanged state', () => {
         const { ha, thinq, dev } = makeDevice()
 
+        let publishCount = 0
+        const origPublish = ha.publishProperty.bind(ha)
+        ha.publishProperty = (id: string, prop: string, value: string | number) => {
+            if (prop !== 'availability') publishCount++
+            origPublish(id, prop, value)
+        }
+
         thinq.emit('data', buf(RUNNING_START_HEX))
-        const countAfterFirst = Object.keys(ha.devices[DEVICE_ID].properties).length
+        const countAfterFirst = publishCount
 
-        thinq.emit('data', buf(RUNNING_START_HEX)) // same state again
+        thinq.emit('data', buf(RUNNING_START_HEX)) // identical packet
+        assert.equal(publishCount, countAfterFirst, 'no re-publish for identical packet')
 
-        // Property count must not grow (no spurious re-publishes)
-        assert.equal(Object.keys(ha.devices[DEVICE_ID].properties).length, countAfterFirst)
+        dev.drop()
+    })
+
+    test('different sentinel remaining values in standby do not re-publish', () => {
+        const { ha, thinq, dev } = makeDevice()
+
+        let publishCount = 0
+        const origPublish = ha.publishProperty.bind(ha)
+        ha.publishProperty = (id: string, prop: string, value: string | number) => {
+            if (prop !== 'availability') publishCount++
+            origPublish(id, prop, value)
+        }
+
+        thinq.emit('data', buf(STANDBY_HEX)) // remaining=821 → computes to 0
+        const countAfterFirst = publishCount
+
+        // remaining=512 — different raw sentinel value, still ≥200 → same computed output
+        thinq.emit('data', buf(STANDBY_SENTINEL2_HEX))
+        assert.equal(publishCount, countAfterFirst, 'no re-publish when only sentinel value changes')
+
+        assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'standby')
+        assert.equal(ha.devices[DEVICE_ID].properties['remaining-'], 0)
 
         dev.drop()
     })

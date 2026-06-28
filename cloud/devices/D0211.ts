@@ -71,6 +71,10 @@ export default class Device extends HADevice {
     private remaining: number = 0
     private temp: number = 0
 
+    private lastStatus: string = ''
+    private lastRemaining: number = -1
+    private lastTemp: number = -1
+
     constructor(HA: Connection, thinq: Thinq2Device, meta: Metadata) {
         super(HA, thinq.id)
         thinq.on('data', (data: Buffer) => this.processData(data))
@@ -143,20 +147,12 @@ export default class Device extends HADevice {
     private processRecord(r: Buffer) {
         if (r.length < 26) return
 
-        const newState = r[2]
-        const newSub = r[3]
-        const newRemaining = r.readUInt16BE(9)
-        const newTemp = r[13]
+        this.state = r[2]
+        this.sub = r[3]
+        this.remaining = r.readUInt16BE(9)
+        this.temp = r[13]
 
-        if (newState === this.state && newSub === this.sub && newRemaining === this.remaining && newTemp === this.temp)
-            return
-
-        this.state = newState
-        this.sub = newSub
-        this.remaining = newRemaining
-        this.temp = newTemp
-
-        log('status', this.id, `state=${newState} sub=${newSub} remaining=${newRemaining} temp=${newTemp}`)
+        log('status', this.id, `state=${this.state} sub=${this.sub} remaining=${this.remaining} temp=${this.temp}`)
         this.publishState()
     }
 
@@ -195,8 +191,17 @@ export default class Device extends HADevice {
     }
 
     private publishState() {
-        this.HA.publishProperty(this.id, 'status-', this.computeStatus())
-        this.HA.publishProperty(this.id, 'remaining-', this.computeRemaining())
+        const status = this.computeStatus()
+        const remaining = this.computeRemaining()
+
+        if (status === this.lastStatus && remaining === this.lastRemaining && this.temp === this.lastTemp) return
+
+        this.lastStatus = status
+        this.lastRemaining = remaining
+        this.lastTemp = this.temp
+
+        this.HA.publishProperty(this.id, 'status-', status)
+        this.HA.publishProperty(this.id, 'remaining-', remaining)
         if (this.temp > 0) this.HA.publishProperty(this.id, 'temperature-', this.temp)
     }
 
