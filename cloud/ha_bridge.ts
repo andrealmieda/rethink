@@ -1,4 +1,5 @@
 import D0211 from './devices/D0211'
+import WSED7613S from './devices/WSED7613S'
 import POT_056905_WW from './devices/POT_056905_WW'
 import WTDN3 from './devices/WTDN3'
 import RAC_056905_WW from './devices/RAC_056905_WW'
@@ -36,6 +37,7 @@ const t1deviceTypes: Record<string, T1Factory> = {
 
 const t2deviceTypes: Record<string, T2Factory> = {
     D0211,
+    WSED7613S,
     POT_056905_WW,
     RAC_056905_WW,
     ['RAC_0B0001_WW']: RAC_056905_WW, // a different European variant (deviceType 401, RTK_RTL8720cm), same TLV handler
