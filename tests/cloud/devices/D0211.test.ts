@@ -65,6 +65,9 @@ describe(MODEL_ID, () => {
         assert.equal(comps.status?.device_class, 'enum')
         assert.ok((comps.status?.options as string[]).includes('washing'), 'options include washing')
 
+        assert.equal(comps.duration?.platform, 'sensor', 'duration component')
+        assert.equal(comps.duration?.device_class, 'duration')
+
         assert.equal(comps.remaining?.platform, 'sensor', 'remaining component')
         assert.equal(comps.remaining?.device_class, 'duration')
         assert.equal(comps.remaining?.unit_of_measurement, 'min')
@@ -75,23 +78,25 @@ describe(MODEL_ID, () => {
         dev.drop()
     })
 
-    test('32_EB standby packet: status=standby, remaining=0 (sentinel v2=821)', () => {
+    test('32_EB standby packet: status=standby, duration=0, remaining=0 (sentinel v2=821)', () => {
         const { ha, thinq, dev } = makeDevice()
 
         thinq.emit('data', buf(STANDBY_HEX))
 
         assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'standby')
+        assert.equal(ha.devices[DEVICE_ID].properties['duration-'], 0)
         assert.equal(ha.devices[DEVICE_ID].properties['remaining-'], 0)
 
         dev.drop()
     })
 
-    test('32_EC running start: status=washing, remaining=18', () => {
+    test('32_EC running start: status=washing, duration=18, remaining=18', () => {
         const { ha, thinq, dev } = makeDevice()
 
         thinq.emit('data', buf(RUNNING_START_HEX))
 
         assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'washing')
+        assert.equal(ha.devices[DEVICE_ID].properties['duration-'], 18)
         assert.equal(ha.devices[DEVICE_ID].properties['remaining-'], 18)
         assert.equal(ha.devices[DEVICE_ID].properties['temperature-'], 28)
 

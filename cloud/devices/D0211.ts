@@ -68,10 +68,12 @@ const STATUS_FINISHING = 'finishing'
 export default class Device extends HADevice {
     private state: number = -1
     private sub: number = -1
+    private duration: number = 0
     private remaining: number = 0
     private temp: number = 0
 
     private lastStatus: string = ''
+    private lastDuration: number = -1
     private lastRemaining: number = -1
     private lastTemp: number = -1
 
@@ -98,6 +100,16 @@ export default class Device extends HADevice {
                         STATUS_FINISHING,
                     ],
                     state_topic: '$this/status-',
+                },
+                duration: {
+                    platform: 'sensor',
+                    unique_id: '$deviceid-duration',
+                    name: 'Program duration',
+                    icon: 'mdi:timer-sand',
+                    device_class: 'duration',
+                    unit_of_measurement: 'min',
+                    state_class: 'measurement',
+                    state_topic: '$this/duration-',
                 },
                 remaining: {
                     platform: 'sensor',
@@ -149,10 +161,11 @@ export default class Device extends HADevice {
 
         this.state = r[2]
         this.sub = r[3]
+        this.duration = r.readUInt16BE(5)
         this.remaining = r.readUInt16BE(9)
         this.temp = r[13]
 
-        log('status', this.id, `state=${this.state} sub=${this.sub} remaining=${this.remaining} temp=${this.temp}`)
+        log('status', this.id, `state=${this.state} sub=${this.sub} duration=${this.duration} remaining=${this.remaining} temp=${this.temp}`)
         this.publishState()
     }
 
@@ -190,17 +203,31 @@ export default class Device extends HADevice {
         return this.remaining
     }
 
+    private computeDuration(): number {
+        if (this.duration >= SENTINEL_THRESHOLD) return 0
+        return this.duration
+    }
+
     private publishState() {
         const status = this.computeStatus()
+        const duration = this.computeDuration()
         const remaining = this.computeRemaining()
 
-        if (status === this.lastStatus && remaining === this.lastRemaining && this.temp === this.lastTemp) return
+        if (
+            status === this.lastStatus &&
+            duration === this.lastDuration &&
+            remaining === this.lastRemaining &&
+            this.temp === this.lastTemp
+        )
+            return
 
         this.lastStatus = status
+        this.lastDuration = duration
         this.lastRemaining = remaining
         this.lastTemp = this.temp
 
         this.HA.publishProperty(this.id, 'status-', status)
+        this.HA.publishProperty(this.id, 'duration-', duration)
         this.HA.publishProperty(this.id, 'remaining-', remaining)
         if (this.temp > 0) this.HA.publishProperty(this.id, 'temperature-', this.temp)
     }
