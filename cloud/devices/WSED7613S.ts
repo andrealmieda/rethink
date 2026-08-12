@@ -92,16 +92,35 @@ import log from '@/util/logging'
  *                        cur_temp stayed 0 throughout), not just briefly
  *                        "stopping/finishing" as previously documented from a single
  *                        steam-proof capture.
- *   [15]     mode       function selector while a timer is active, 0x00 otherwise -
- *                        CONFIRMED 2026-08-12: 0x81=steam-proof, 0x83=top/bottom
- *                        heat, 0x98=air fry. Not the same byte values as the 0xF043
- *                        command's own <func> selector (0x18/0x03) - this is a
- *                        separate enum in the state record.
+ *   [15]     mode       function selector while a timer/cook is active, 0x00
+ *                        otherwise. CONFIRMED 2026-08-12 remote-started (via app/
+ *                        0xF043): 0x81=steam-proof, 0x83=top/bottom heat, 0x98=air
+ *                        fry. CONFIRMED 2026-08-12 locally-started (physical panel,
+ *                        no timer set): air fry showed 0x18, not 0x98 - and 0x18 is
+ *                        exactly the 0xF043 command's own <func> byte for air fry.
+ *                        Same pattern for top/bottom heat's <func>=0x03 vs its
+ *                        remote-mode 0x83. Unifying rule: mode = <func> | 0x80 when
+ *                        the cook was started remotely, or bare <func> when started
+ *                        locally - i.e. bit 0x80 tracks HOW the cook was started,
+ *                        not which function is running. Predicts (not yet
+ *                        confirmed) steam-proof's <func> is 0x01, since its only
+ *                        observed mode so far (0x81) was from a remote start.
  *   [16]     seconds    countdown seconds (0–59)
- *   [17]     minutes    countdown minutes
- *   [18]     00         constant
- *   [19]     set_min    set timer duration in minutes (fixed during a cook)
- *   [20]     00         constant
+ *   [17]     minutes    countdown minutes-within-the-hour (0–59) once the timer is
+ *                        >=1h - see [18] below - otherwise the plain minute count
+ *   [18]     hours      countdown hours - CONFIRMED 2026-08-12, was wrongly listed
+ *                        as "constant": live-resetting a local timer from 1h6min to
+ *                        2h showed this jump 1->2 in lockstep with [20] at the reset
+ *                        instant, then drop to 1 (independently of [20], which held
+ *                        at 2) on the very next tick as minutes wrapped 0->59 - i.e.
+ *                        real H:MM:SS countdown carry behavior, not a flat "has an
+ *                        hour" flag.
+ *   [19]     set_min    set timer duration, minutes-within-the-hour once >=1h (goes
+ *                        with [20] the same way [17] goes with [18])
+ *   [20]     set_hours  set timer duration, hours - CONFIRMED 2026-08-12 alongside
+ *                        [18] above (was wrongly listed as "constant"): fixed at the
+ *                        cook's original hour count for its whole duration, exactly
+ *                        mirroring how [19] stays fixed rather than counting down.
  *   [21]     0x80       heat-element active flag (0x80=on, 0x00=off)
  *   [22]     set_temp   target temperature °C  (e.g. 0x1E=30°C for steam-proof mode)
  *   [23]     00         constant
@@ -197,7 +216,9 @@ export default class Device extends HADevice {
     private state: number = -1
     private seconds: number = 0
     private minutes: number = 0
+    private hours: number = 0
     private setMin: number = 0
+    private setHours: number = 0
     private setTemp: number = 0
     private curTemp: number = 0
     private ambTemp: number = 0
@@ -422,7 +443,9 @@ export default class Device extends HADevice {
         this.state = r[14]
         this.seconds = r[16]
         this.minutes = r[17]
+        this.hours = r[18]
         this.setMin = r[19]
+        this.setHours = r[20]
         this.setTemp = r[22]
         this.curTemp = r[24]
         this.door = (r[27] & 0x04) !== 0
@@ -431,7 +454,7 @@ export default class Device extends HADevice {
         log(
             'status',
             this.id,
-            `state=${this.state} remaining=${this.minutes}m${this.seconds}s setMin=${this.setMin} setTemp=${this.setTemp} curTemp=${this.curTemp}`,
+            `state=${this.state} remaining=${this.hours}h${this.minutes}m${this.seconds}s setMin=${this.setHours}h${this.setMin}m setTemp=${this.setTemp} curTemp=${this.curTemp}`,
         )
         this.publishState()
     }
@@ -442,17 +465,22 @@ export default class Device extends HADevice {
 
     private computeRemaining(): number {
         if (this.state === 0) return 0
-        return Math.round((this.minutes + this.seconds / 60) * 100) / 100
+        return Math.round((this.hours * 60 + this.minutes + this.seconds / 60) * 100) / 100
+    }
+
+    private computeSetDuration(): number {
+        return this.setHours * 60 + this.setMin
     }
 
     private publishState() {
         const status = this.computeStatus()
         const remaining = this.computeRemaining()
+        const setDuration = this.computeSetDuration()
 
         if (
             status === this.lastStatus &&
             remaining === this.lastRemaining &&
-            this.setMin === this.lastSetMin &&
+            setDuration === this.lastSetMin &&
             this.setTemp === this.lastSetTemp &&
             this.curTemp === this.lastCurTemp &&
             this.ambTemp === this.lastAmbTemp &&
@@ -462,7 +490,7 @@ export default class Device extends HADevice {
 
         this.lastStatus = status
         this.lastRemaining = remaining
-        this.lastSetMin = this.setMin
+        this.lastSetMin = setDuration
         this.lastSetTemp = this.setTemp
         this.lastCurTemp = this.curTemp
         this.lastAmbTemp = this.ambTemp
@@ -470,7 +498,7 @@ export default class Device extends HADevice {
 
         this.HA.publishProperty(this.id, 'status-', status)
         this.HA.publishProperty(this.id, 'remaining-', remaining)
-        this.HA.publishProperty(this.id, 'set_timer-', this.setMin)
+        this.HA.publishProperty(this.id, 'set_timer-', setDuration)
         if (this.setTemp > 0) this.HA.publishProperty(this.id, 'set_temperature-', this.setTemp)
         if (this.curTemp > 0) this.HA.publishProperty(this.id, 'temperature-', this.curTemp)
         if (this.ambTemp > 0) this.HA.publishProperty(this.id, 'ambient_temperature-', this.ambTemp)
