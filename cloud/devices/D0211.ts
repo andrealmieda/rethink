@@ -37,8 +37,19 @@ import log from '@/util/logging'
  *   [2]     state      0=off/done  1=standby  2=running  3=running(heat)  4=standby  5=finishing
  *   [3]     sub        cycle phase: 0=none  2=washing(?)  3=rinsing  4=drying  5=finishing
  *   [4]     00         constant
- *   [5..6]  v1         BE u16: initial cycle duration in minutes (18 for quick wash;
- *                              0x0335=821 is a sentinel value when no program is selected)
+ *   [5..6]  v1         BE u16: initial cycle duration in minutes for fixed-length
+ *                              programs (18 for quick wash; 0x0335=821 is a sentinel
+ *                              when no program is selected). CORRECTED 2026-08-12:
+ *                              does NOT hold for adaptive/soil-sensing programs (a
+ *                              live "Auto" cycle showed v1=791, remaining live-jumping
+ *                              768->571 mid-wash rather than counting down smoothly) -
+ *                              so this field is actually the fixed program's declared
+ *                              duration OR an adaptive program's evolving estimate,
+ *                              and the two aren't distinguishable from this byte
+ *                              alone. The sentinel check below is now gated to
+ *                              standby only, since ≥200 here turned out to be a
+ *                              legitimate in-progress Auto value, not just the 821
+ *                              "no program" placeholder.
  *   [7]     counter    sequence/step byte; 05 in standby, 06 while running
  *   [8]     00         constant
  *   [9..10] remaining  BE u16: remaining cycle time in minutes (counts down from v1 to 0)
@@ -219,11 +230,20 @@ export default class Device extends HADevice {
         }
     }
 
-    // Returns remaining minutes. Sentinel values (≥ SENTINEL_THRESHOLD, meaning
-    // no program selected) and done states are reported as 0.
+    // Standby (no cycle running): state 1 with no program dialed in yet reports the
+    // sentinel; state 4 is the other standby variant.
+    private isStandby(): boolean {
+        return this.state === 1 || this.state === 4
+    }
+
+    // Returns remaining minutes. Sentinel values (≥ SENTINEL_THRESHOLD, meaning no
+    // program selected) and done states are reported as 0. The sentinel check only
+    // applies in standby - CORRECTED 2026-08-12: a live Auto cycle legitimately read
+    // ≥200 while actively running, so "no program selected" can't be inferred from
+    // magnitude alone once a cycle has actually started.
     private computeRemaining(): number {
         if (this.state === 0 || this.state === 4) return 0
-        if (this.remaining >= SENTINEL_THRESHOLD) return 0
+        if (this.isStandby() && this.remaining >= SENTINEL_THRESHOLD) return 0
         return this.remaining
     }
 
@@ -232,7 +252,7 @@ export default class Device extends HADevice {
         // v1 on its own when a cycle finishes (confirmed by DONE_HEX below, state=0 but
         // v1 still 18) - without this the sensor would stick at the last cycle's length.
         if (this.state === 0) return 0
-        if (this.duration >= SENTINEL_THRESHOLD) return 0
+        if (this.isStandby() && this.duration >= SENTINEL_THRESHOLD) return 0
         return this.duration
     }
 

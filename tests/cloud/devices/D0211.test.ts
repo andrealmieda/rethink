@@ -44,6 +44,13 @@ const DONE_HEX =
 const STANDBY_SENTINEL2_HEX =
     'AA3A32EC001801000002330300023300001C840202010000000000000000001801000002000700020000001C840202010000000000000000A3BB'
 
+// Real capture (2026-08-12), an actively-running "Auto" (soil-sensing) cycle:
+// R1=state=2,v1=791,remaining=788 -> R2=state=2,v1=791,remaining=787. Both v1 and
+// remaining are ≥200 despite the cycle genuinely running - Auto's adaptive estimate,
+// not the 821 "no program" sentinel.
+const AUTO_CYCLE_RUNNING_HEX =
+    'AA3A32EC0018020200031701000314000014040202010000000000000000001802020003170100031300001404020201000000000000000082BB'
+
 function makeDevice() {
     const ha = new MockHAConnection()
     const thinq = new MockThinq2Device(DEVICE_ID, META)
@@ -192,6 +199,19 @@ describe(MODEL_ID, () => {
 
         assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'standby')
         assert.equal(ha.devices[DEVICE_ID].properties['remaining-'], 0)
+
+        dev.drop()
+    })
+
+    test('an actively-running Auto cycle is not mistaken for the standby sentinel', () => {
+        const { ha, thinq, dev } = makeDevice()
+
+        thinq.emit('data', buf(AUTO_CYCLE_RUNNING_HEX))
+
+        const p = ha.devices[DEVICE_ID].properties
+        assert.equal(p['status-'], 'washing')
+        assert.equal(p['duration-'], 791, 'v1=791 shown as-is - not suppressed just for being >= 200 while running')
+        assert.equal(p['remaining-'], 787, 'remaining=787 shown as-is for the same reason')
 
         dev.drop()
     })
