@@ -50,12 +50,29 @@ import log from '@/util/logging'
  *                              standby only, since ≥200 here turned out to be a
  *                              legitimate in-progress Auto value, not just the 821
  *                              "no program" placeholder.
- *   [7]     counter    sequence/step byte; 05 in standby, 06 while running
+ *   [7]     counter    sequence/step byte - HYPOTHESIS revised 2026-08-12: originally
+ *                              "05 standby, 06 running" from the quick-wash capture,
+ *                              but an Auto cycle held this at 1 for its entire ~95 min
+ *                              observed stretch (still running) - so it's evidently
+ *                              program-dependent, not a universal standby/running flag.
  *   [8]     00         constant
- *   [9..10] remaining  BE u16: remaining cycle time in minutes (counts down from v1 to 0)
+ *   [9..10] remaining  BE u16, counts down from v1 - for fixed-length programs this is
+ *                              literally minutes; CORRECTED 2026-08-12 for Auto: ticks
+ *                              down ~1 unit/real-minute most of the time but also jumps
+ *                              non-monotonically (768->571 in one step) as the machine's
+ *                              soil sensor revises its estimate, and doesn't convert to
+ *                              real minutes by any fixed ratio we could find (cross-
+ *                              checked against the official lg_thinq integration's own
+ *                              absolute finish-time: ~3.9x off near cycle start, ~3.26x
+ *                              off after the jump - inconsistent, so no known formula).
  *   [11..12] 00 00     constant
- *   [13]    temp       HYPOTHESIS: wash temperature in °C; 28 normal, 30 during heat burst
- *   [14]    flags      mostly 0; 4 observed briefly at cycle start
+ *   [13]    temp       HYPOTHESIS: wash temperature in °C; 28 normal, 30 during heat
+ *                              burst (quick-wash capture) - held at a constant 20 for
+ *                              the entire Auto cycle observed 2026-08-12, no heat burst
+ *   [14]    flags      CORRECTED 2026-08-12: NOT "mostly 0, briefly 4 at cycle start" -
+ *                              an Auto cycle held this at 4 continuously for its entire
+ *                              ~95 min observed stretch, so "briefly" doesn't hold
+ *                              universally either; still don't know what it signals
  *   [15..17] 02 02 01  constant
  *   [18..25] 00…       padding
  *
