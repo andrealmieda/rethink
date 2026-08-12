@@ -82,7 +82,18 @@ import log from '@/util/logging'
  *   [22]     set_temp   target temperature °C  (e.g. 0x1E=30°C for steam-proof mode)
  *   [23]     00         constant
  *   [24]     cur_temp   actual oven temperature °C (rises from ambient toward set_temp)
- *   [25..30] 00…        constant
+ *   [25..26] 00…        constant
+ *   [27]     flags      bit 0x04 = door open - CONFIRMED 2026-08-12 twice (once
+ *                        during an active cook, once while idle): sets for exactly
+ *                        the few seconds the door is physically open, clears on
+ *                        close. bit 0x20 = seen set only while actively cooking
+ *                        (baseline 0x20 running / 0x00 idle, independent of the
+ *                        door bit) - HYPOTHESIS, meaning otherwise unconfirmed. The
+ *                        oven's fan is audible even while state=0 (off) but produces
+ *                        no change anywhere in this record or any new packet, same
+ *                        as the light - neither appears to round-trip through this
+ *                        protocol at all.
+ *   [28..30] 00…        constant
  *   [31]     amb_temp   ambient/residual thermistor reading (retained even when off);
  *                       decays toward true room temp after a cook (e.g. 30 right after
  *                       a 30°C cook stops, cooling to 19, then 17 during a longer idle)
@@ -157,6 +168,7 @@ export default class Device extends HADevice {
     private setTemp: number = 0
     private curTemp: number = 0
     private ambTemp: number = 0
+    private door: boolean = false
 
     // Staged start parameters, settable from HA before pressing Start (or while
     // already running - the same command updates a live cook), mirroring the ThinQ
@@ -171,6 +183,7 @@ export default class Device extends HADevice {
     private lastSetTemp: number = -1
     private lastCurTemp: number = -1
     private lastAmbTemp: number = -1
+    private lastDoor: boolean | undefined = undefined
 
     constructor(
         HA: Connection,
@@ -298,6 +311,13 @@ export default class Device extends HADevice {
                     state_topic: '$this/ambient_temperature-',
                     entity_category: 'diagnostic',
                 },
+                door: {
+                    platform: 'binary_sensor',
+                    unique_id: '$deviceid-door',
+                    name: 'Door',
+                    device_class: 'door',
+                    state_topic: '$this/door-',
+                },
             },
         })
 
@@ -339,6 +359,7 @@ export default class Device extends HADevice {
         this.setMin = r[19]
         this.setTemp = r[22]
         this.curTemp = r[24]
+        this.door = (r[27] & 0x04) !== 0
         this.ambTemp = r[31]
 
         log(
@@ -368,7 +389,8 @@ export default class Device extends HADevice {
             this.setMin === this.lastSetMin &&
             this.setTemp === this.lastSetTemp &&
             this.curTemp === this.lastCurTemp &&
-            this.ambTemp === this.lastAmbTemp
+            this.ambTemp === this.lastAmbTemp &&
+            this.door === this.lastDoor
         )
             return
 
@@ -378,6 +400,7 @@ export default class Device extends HADevice {
         this.lastSetTemp = this.setTemp
         this.lastCurTemp = this.curTemp
         this.lastAmbTemp = this.ambTemp
+        this.lastDoor = this.door
 
         this.HA.publishProperty(this.id, 'status-', status)
         this.HA.publishProperty(this.id, 'remaining-', remaining)
@@ -385,6 +408,7 @@ export default class Device extends HADevice {
         if (this.setTemp > 0) this.HA.publishProperty(this.id, 'set_temperature-', this.setTemp)
         if (this.curTemp > 0) this.HA.publishProperty(this.id, 'temperature-', this.curTemp)
         if (this.ambTemp > 0) this.HA.publishProperty(this.id, 'ambient_temperature-', this.ambTemp)
+        this.HA.publishProperty(this.id, 'door-', this.door ? 'ON' : 'OFF')
     }
 
     setProperty(prop: string, value: string) {
