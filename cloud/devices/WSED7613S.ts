@@ -86,8 +86,9 @@ export default class Device extends HADevice {
                     name: 'Remaining time',
                     icon: 'mdi:timer-outline',
                     device_class: 'duration',
-                    unit_of_measurement: 's',
+                    unit_of_measurement: 'min',
                     state_class: 'measurement',
+                    suggested_display_precision: 1,
                     state_topic: '$this/remaining-',
                 },
                 set_timer: {
@@ -113,7 +114,7 @@ export default class Device extends HADevice {
                 temperature: {
                     platform: 'sensor',
                     unique_id: '$deviceid-temperature',
-                    name: 'Temperature',
+                    name: 'Current temperature',
                     icon: 'mdi:thermometer-water',
                     device_class: 'temperature',
                     unit_of_measurement: '°C',
@@ -178,7 +179,7 @@ export default class Device extends HADevice {
 
     private computeRemaining(): number {
         if (this.state === 0) return 0
-        return this.minutes * 60 + this.seconds
+        return Math.round((this.minutes + this.seconds / 60) * 100) / 100
     }
 
     private publishState() {

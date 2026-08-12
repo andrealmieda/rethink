@@ -61,7 +61,7 @@ describe(MODEL_ID, () => {
         assert.ok((comps.status?.options as string[]).includes('on'))
 
         assert.equal(comps.remaining?.device_class, 'duration')
-        assert.equal(comps.remaining?.unit_of_measurement, 's')
+        assert.equal(comps.remaining?.unit_of_measurement, 'min')
 
         assert.equal(comps.set_timer?.device_class, 'duration')
         assert.equal(comps.set_timer?.unit_of_measurement, 'min')
@@ -94,14 +94,14 @@ describe(MODEL_ID, () => {
         dev.drop()
     })
 
-    test('cooking start: status=on, remaining=900s (15m), setMin=15, setTemp=30, curTemp=25', () => {
+    test('cooking start: status=on, remaining=15min, setMin=15, setTemp=30, curTemp=25', () => {
         const { ha, thinq, dev } = makeDevice()
 
         thinq.emit('data', buf(COOKING_START_HEX))
 
         const p = ha.devices[DEVICE_ID].properties
         assert.equal(p['status-'], 'on')
-        assert.equal(p['remaining-'], 900) // 15*60
+        assert.equal(p['remaining-'], 15) // 15m00s
         assert.equal(p['set_timer-'], 15)
         assert.equal(p['set_temperature-'], 30)
         assert.equal(p['temperature-'], 25)
@@ -109,13 +109,13 @@ describe(MODEL_ID, () => {
         dev.drop()
     })
 
-    test('countdown: remaining decrements by one second', () => {
+    test('countdown: remaining decrements by one second, reported in minutes', () => {
         const { ha, thinq, dev } = makeDevice()
 
-        thinq.emit('data', buf(COOKING_START_HEX)) // 15:00 = 900s
-        thinq.emit('data', buf(COUNTDOWN_HEX)) // 14:59 = 899s
+        thinq.emit('data', buf(COOKING_START_HEX)) // 15m00s = 15 min
+        thinq.emit('data', buf(COUNTDOWN_HEX)) // 14m59s = 14.98 min
 
-        assert.equal(ha.devices[DEVICE_ID].properties['remaining-'], 899)
+        assert.equal(ha.devices[DEVICE_ID].properties['remaining-'], 14.98)
 
         dev.drop()
     })
