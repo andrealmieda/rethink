@@ -54,6 +54,30 @@ import log from '@/util/logging'
  *                 use different <func> values we haven't captured yet.
  *   0xF0 0x44  – stop the current cook. CONFIRMED 2026-08-12: payload is a single
  *                 0x00 byte.
+ *   0xF0 0xED  – capability-list push, normally sent by the cloud automatically in
+ *                 reaction to a 0x40EB re-announce (see above) - but CONFIRMED live
+ *                 2026-08-12 (reproduced 4 times) that replaying it on demand also
+ *                 reliably makes the device send back a fresh 0x40EB, i.e. it
+ *                 doubles as a query command that reads current state without
+ *                 starting a cook. Important caveat, also confirmed live: this (and
+ *                 every other 0xF0-family command, even the already-live 0xF044
+ *                 stop) gets silently dropped - no ack, no response at all - when
+ *                 the appliance's WiFi has gone idle-to-sleep, which happens after
+ *                 some period with no activity; it only works while the appliance
+ *                 is actually connected. Physical activity at the oven (confirmed:
+ *                 opening the door) wakes it back up - NOT specifically a "Remote
+ *                 Start" session as first suspected; that was a wrong theory from
+ *                 an earlier round of testing that happened to coincide with a
+ *                 button press. The constructor pings REFRESH_QUERY every 2
+ *                 minutes as an attempted keepalive - CONFIRMED live 2026-08-12
+ *                 this does NOT prevent the sleep: 4 consecutive pings 2 minutes
+ *                 apart all went unanswered once the device decided to sleep, so
+ *                 the sleep timer is anchored to something else (real activity?),
+ *                 not to incoming traffic. sendKeepalive()/`awake` below exist so
+ *                 we stop spamming pings once one goes unanswered, rather than to
+ *                 actually keep the connection alive - pinging resumes
+ *                 automatically the moment the device shows any sign of life on
+ *                 its own.
  *
  * 115-byte state record layout (0-indexed within record):
  *   [0..13]  00 00 01 00 00 01 02 00 FF 03 00 02 00 00  constant header
@@ -160,6 +184,15 @@ const START_COOKING_TEMPLATE: (number | null)[] = [
 ]
 const STOP = 'F04400'
 
+// Confirmed live 2026-08-12 to make the oven send back a fresh 0x40EB state
+// snapshot without starting a cook - see the 0xF0 0xED doc note above.
+const REFRESH_QUERY = 'F0ED114101000000181A1017181C272E2F33505356595C00000000000000000000000000'
+
+// How long to wait for a reply to a keepalive query before assuming the
+// appliance's WiFi has gone to sleep and pausing further pings.
+const KEEPALIVE_REPLY_TIMEOUT_MS = 10 * 1000
+const KEEPALIVE_INTERVAL_MS = 2 * 60 * 1000
+
 export default class Device extends HADevice {
     private state: number = -1
     private seconds: number = 0
@@ -169,6 +202,18 @@ export default class Device extends HADevice {
     private curTemp: number = 0
     private ambTemp: number = 0
     private door: boolean = false
+
+    // Keepalive bookkeeping: CONFIRMED live 2026-08-12 that pinging on a fixed
+    // interval does NOT keep the appliance's WiFi awake - it went to sleep on its
+    // own schedule regardless, ignoring 4 consecutive pings sent 2 minutes apart.
+    // So instead of blindly pinging forever, we track whether the last query
+    // actually got a reply and stop sending more once it doesn't - `awake` flips
+    // back to true (and pinging resumes) the moment the device shows any sign of
+    // life on its own (a real incoming frame), which happens when something wakes
+    // it up physically (confirmed: opening the door).
+    private refreshInterval: ReturnType<typeof setInterval> | undefined
+    private keepaliveReplyTimeout: ReturnType<typeof setTimeout> | undefined
+    private awake: boolean = true
 
     // Staged start parameters, settable from HA before pressing Start (or while
     // already running - the same command updates a live cook), mirroring the ThinQ
@@ -325,12 +370,33 @@ export default class Device extends HADevice {
         this.HA.publishProperty(this.id, 'start_function-', this.startFunction)
         this.HA.publishProperty(this.id, 'start_temperature-', this.startTemp)
         this.HA.publishProperty(this.id, 'start_duration-', this.startMinutes)
+
+        this.refreshInterval = setInterval(() => this.sendKeepalive(), KEEPALIVE_INTERVAL_MS)
+    }
+
+    drop() {
+        clearInterval(this.refreshInterval)
+        clearTimeout(this.keepaliveReplyTimeout)
+        super.drop()
+    }
+
+    private sendKeepalive() {
+        if (!this.awake) return // already unanswered - don't spam a sleeping device
+        this.send(Buffer.from(REFRESH_QUERY, 'hex'))
+        this.keepaliveReplyTimeout = setTimeout(() => {
+            this.awake = false
+            log('event', this.id, 'keepalive query got no reply - assuming WiFi went to sleep, pausing pings')
+        }, KEEPALIVE_REPLY_TIMEOUT_MS)
     }
 
     processData(buf: Buffer) {
         if (buf.length < 6) return
         if (buf[0] !== 0xaa || buf[buf.length - 1] !== 0xbb) return
         if (buf[1] !== buf.length) return
+
+        if (!this.awake) log('event', this.id, 'device is responding again')
+        this.awake = true
+        clearTimeout(this.keepaliveReplyTimeout)
 
         const cmd = (buf[2] << 8) | buf[3]
         const data = buf.subarray(4, buf.length - 2)

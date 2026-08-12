@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import DUT from '@/cloud/devices/WSED7613S'
 import type { Metadata } from '@/cloud/thinq'
 import { MockHAConnection, MockThinq2Device, buf } from '@/tests/helpers/mocks'
+import { enableMockTimers, tickMockTimers } from '@/tests/helpers/timers'
 
 const DEVICE_ID = 'test-oven-id'
 const MODEL_ID = 'WSED7613S'
@@ -84,6 +85,7 @@ describe(MODEL_ID, () => {
         assert.equal(comps.start_duration?.platform, 'number')
         assert.equal(comps.start?.platform, 'button')
         assert.equal(comps.stop?.platform, 'button')
+        assert.equal(comps.refresh, undefined, 'refresh is automatic, not a button')
 
         assert.equal(comps.door?.platform, 'binary_sensor')
         assert.equal(comps.door?.device_class, 'door')
@@ -241,6 +243,33 @@ describe(MODEL_ID, () => {
         assert.equal(thinq.outbox.length, 1)
         // Real capture (2026-08-12): AA 07 F0 44 00 B0 BB
         assert.equal(thinq.outbox[0].toString('hex'), 'aa07f04400b0bb')
+
+        dev.drop()
+    })
+
+    test('keepalive pings periodically, backs off after an unanswered ping, resumes on reply', (t) => {
+        enableMockTimers(t)
+        const { thinq, dev } = makeDevice()
+        thinq.resetRecorder()
+
+        tickMockTimers(t, 2 * 60 * 1000)
+        assert.equal(thinq.outbox.length, 1, 'first keepalive ping sent after 2 minutes')
+        // Real capture (2026-08-12): the confirmed 0xF0ED query payload.
+        assert.equal(
+            thinq.outbox[0].toString('hex'),
+            'aa28f0ed114101000000181a1017181c272e2f33505356595c00000000000000000000000000a1bb',
+        )
+
+        // No reply within the 10s window -> marked asleep, no further spam
+        tickMockTimers(t, 10 * 1000)
+        tickMockTimers(t, 2 * 60 * 1000)
+        assert.equal(thinq.outbox.length, 1, 'no further ping sent once one goes unanswered')
+
+        // Device shows a real sign of life on its own (e.g. woken by the door)
+        thinq.emit('data', buf(IDLE_HEX))
+
+        tickMockTimers(t, 2 * 60 * 1000)
+        assert.equal(thinq.outbox.length, 2, 'pinging resumes after the device replies on its own')
 
         dev.drop()
     })
