@@ -14,7 +14,14 @@ import log from '@/util/logging'
  * Frame format:  AA <totalLen> <cmd1> <cmd2> <data…> <crc8> BB
  *
  * Packet types (device → cloud, cmd1=0x40):
- *   0x40 0xEB  – single state record (115 bytes data); sent at startup
+ *   0x40 0xEB  – single state record (115 bytes data); sent at startup, and also
+ *                 whenever the physical "Remote Start" button is pressed (confirmed
+ *                 live 2026-08-12) - byte-identical to the idle baseline either way.
+ *                 That button press doesn't touch anything in the state record; the
+ *                 cloud reacts to it with an unrelated 0xF0 0xED capability-list
+ *                 command (cmd1=0xf0, a generic cross-device session channel, not
+ *                 part of this state protocol), so the "remote enabled" flag is
+ *                 session state on the cloud side, not appliance telemetry.
  *   0x40 0xEC  – double state record (230 = 2×115 bytes); R1=prev, R2=current
  *   0x40 0x72  – event notification
  *   0x40 0x00  – ack/response
@@ -148,6 +155,14 @@ export default class Device extends HADevice {
         const data = buf.subarray(4, buf.length - 2)
 
         if (cmd === 0x40eb && data.length >= 115) {
+            // 0x40EB (single record) fires both at real startup and whenever the
+            // physical "Remote Start" button is pressed - confirmed live 2026-08-12:
+            // pressing it re-sent this exact frame (byte-identical to the idle
+            // baseline) and the cloud replied with an unrelated 0xF0ED capability-list
+            // command. The button doesn't flip any bit in the oven's own state record;
+            // it re-authorizes a session at the protocol/cloud level instead, so this
+            // is the only local signal we have that it was pressed.
+            log('event', this.id, 'device (re-)announced (startup, or Remote Start button pressed)')
             this.processRecord(data.subarray(0, 115))
         } else if (cmd === 0x40ec && data.length >= 230) {
             this.processRecord(data.subarray(115, 230))
