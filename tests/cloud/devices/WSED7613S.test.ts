@@ -101,7 +101,7 @@ describe(MODEL_ID, () => {
 
         const p = ha.devices[DEVICE_ID].properties
         assert.equal(p['status-'], 'on')
-        assert.equal(p['remaining-'], 900)  // 15*60
+        assert.equal(p['remaining-'], 900) // 15*60
         assert.equal(p['set_timer-'], 15)
         assert.equal(p['set_temperature-'], 30)
         assert.equal(p['temperature-'], 25)
@@ -113,9 +113,24 @@ describe(MODEL_ID, () => {
         const { ha, thinq, dev } = makeDevice()
 
         thinq.emit('data', buf(COOKING_START_HEX)) // 15:00 = 900s
-        thinq.emit('data', buf(COUNTDOWN_HEX))      // 14:59 = 899s
+        thinq.emit('data', buf(COUNTDOWN_HEX)) // 14:59 = 899s
 
         assert.equal(ha.devices[DEVICE_ID].properties['remaining-'], 899)
+
+        dev.drop()
+    })
+
+    test('ambient temperature is published and decays after a cook', () => {
+        const { ha, thinq, dev } = makeDevice()
+
+        thinq.emit('data', buf(COOKING_START_HEX)) // ambTemp=19 (pre-cook)
+        assert.equal(ha.devices[DEVICE_ID].properties['ambient_temperature-'], 19)
+
+        thinq.emit('data', buf(DONE_HEX)) // ambTemp=30 (residual heat right after a 30°C cook)
+        assert.equal(ha.devices[DEVICE_ID].properties['ambient_temperature-'], 30)
+
+        thinq.emit('data', buf(IDLE_HEX)) // ambTemp=17 (cooled down during a longer idle)
+        assert.equal(ha.devices[DEVICE_ID].properties['ambient_temperature-'], 17)
 
         dev.drop()
     })
@@ -123,8 +138,8 @@ describe(MODEL_ID, () => {
     test('temperature rises to setpoint', () => {
         const { ha, thinq, dev } = makeDevice()
 
-        thinq.emit('data', buf(COOKING_START_HEX))  // curTemp=25
-        thinq.emit('data', buf(TEMP_REACHED_HEX))   // curTemp=30
+        thinq.emit('data', buf(COOKING_START_HEX)) // curTemp=25
+        thinq.emit('data', buf(TEMP_REACHED_HEX)) // curTemp=30
 
         assert.equal(ha.devices[DEVICE_ID].properties['temperature-'], 30)
 
@@ -165,9 +180,9 @@ describe(MODEL_ID, () => {
     test('malformed frames are ignored', () => {
         const { ha, thinq, dev } = makeDevice()
 
-        thinq.emit('data', buf('BB0440EC1234BB'))   // wrong start byte
-        thinq.emit('data', buf('AA0040EC1234BB'))   // wrong length
-        thinq.emit('data', buf('AA04AABBBBBB'))     // too short
+        thinq.emit('data', buf('BB0440EC1234BB')) // wrong start byte
+        thinq.emit('data', buf('AA0040EC1234BB')) // wrong length
+        thinq.emit('data', buf('AA04AABBBBBB')) // too short
 
         assert.deepEqual(ha.devices[DEVICE_ID].properties, {})
 

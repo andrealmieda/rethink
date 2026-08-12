@@ -33,7 +33,9 @@ import log from '@/util/logging'
  *   [23]     00         constant
  *   [24]     cur_temp   actual oven temperature °C (rises from ambient toward set_temp)
  *   [25..30] 00…        constant
- *   [31]     amb_temp   ambient/residual thermistor reading (retained even when off)
+ *   [31]     amb_temp   ambient/residual thermistor reading (retained even when off);
+ *                       decays toward true room temp after a cook (e.g. 30 right after
+ *                       a 30°C cook stops, cooling to 19, then 17 during a longer idle)
  *   [32..]   00…        padding
  *
  * Double-record 40_EC packets carry (previous_state, current_state). We always
@@ -53,12 +55,14 @@ export default class Device extends HADevice {
     private setMin: number = 0
     private setTemp: number = 0
     private curTemp: number = 0
+    private ambTemp: number = 0
 
     private lastStatus: string = ''
     private lastRemaining: number = -1
     private lastSetMin: number = -1
     private lastSetTemp: number = -1
     private lastCurTemp: number = -1
+    private lastAmbTemp: number = -1
 
     constructor(HA: Connection, thinq: Thinq2Device, meta: Metadata) {
         super(HA, thinq.id)
@@ -117,6 +121,17 @@ export default class Device extends HADevice {
                     state_topic: '$this/temperature-',
                     entity_category: 'diagnostic',
                 },
+                ambient_temperature: {
+                    platform: 'sensor',
+                    unique_id: '$deviceid-ambient-temperature',
+                    name: 'Ambient temperature',
+                    icon: 'mdi:thermometer',
+                    device_class: 'temperature',
+                    unit_of_measurement: '°C',
+                    state_class: 'measurement',
+                    state_topic: '$this/ambient_temperature-',
+                    entity_category: 'diagnostic',
+                },
             },
         })
 
@@ -147,8 +162,13 @@ export default class Device extends HADevice {
         this.setMin = r[19]
         this.setTemp = r[22]
         this.curTemp = r[24]
+        this.ambTemp = r[31]
 
-        log('status', this.id, `state=${this.state} remaining=${this.minutes}m${this.seconds}s setMin=${this.setMin} setTemp=${this.setTemp} curTemp=${this.curTemp}`)
+        log(
+            'status',
+            this.id,
+            `state=${this.state} remaining=${this.minutes}m${this.seconds}s setMin=${this.setMin} setTemp=${this.setTemp} curTemp=${this.curTemp}`,
+        )
         this.publishState()
     }
 
@@ -170,7 +190,8 @@ export default class Device extends HADevice {
             remaining === this.lastRemaining &&
             this.setMin === this.lastSetMin &&
             this.setTemp === this.lastSetTemp &&
-            this.curTemp === this.lastCurTemp
+            this.curTemp === this.lastCurTemp &&
+            this.ambTemp === this.lastAmbTemp
         )
             return
 
@@ -179,12 +200,14 @@ export default class Device extends HADevice {
         this.lastSetMin = this.setMin
         this.lastSetTemp = this.setTemp
         this.lastCurTemp = this.curTemp
+        this.lastAmbTemp = this.ambTemp
 
         this.HA.publishProperty(this.id, 'status-', status)
         this.HA.publishProperty(this.id, 'remaining-', remaining)
         this.HA.publishProperty(this.id, 'set_timer-', this.setMin)
         if (this.setTemp > 0) this.HA.publishProperty(this.id, 'set_temperature-', this.setTemp)
         if (this.curTemp > 0) this.HA.publishProperty(this.id, 'temperature-', this.curTemp)
+        if (this.ambTemp > 0) this.HA.publishProperty(this.id, 'ambient_temperature-', this.ambTemp)
     }
 
     setProperty(_prop: string, _value: string) {
