@@ -69,6 +69,11 @@ describe(MODEL_ID, () => {
         assert.equal(comps.set_temperature?.device_class, 'temperature')
         assert.equal(comps.temperature?.entity_category, 'diagnostic')
 
+        assert.equal(comps.start_temperature?.platform, 'number')
+        assert.equal(comps.start_duration?.platform, 'number')
+        assert.equal(comps.start?.platform, 'button')
+        assert.equal(comps.stop?.platform, 'button')
+
         dev.drop()
     })
 
@@ -146,6 +151,50 @@ describe(MODEL_ID, () => {
         dev.drop()
     })
 
+    test('start button defaults to the confirmed 200C/15min air-fry command', () => {
+        const { ha, thinq, dev } = makeDevice()
+
+        ha.setProperty(DEVICE_ID, 'start', 'command', '')
+
+        assert.equal(thinq.outbox.length, 1)
+        // Real capture (2026-08-12): AA 17 F0 43 20 0B 18 00 00 00 01 00 C8 00 0F 00
+        // 00 00 00 00 5A BB - 0xC8=200C, 0x0F=15min at their captured offsets.
+        assert.equal(thinq.outbox[0].toString('hex'), 'aa17f043200b180000000100c8000f0000000000005abb')
+
+        dev.drop()
+    })
+
+    test('setting start_temperature/start_duration changes what start sends', () => {
+        const { ha, thinq, dev } = makeDevice()
+
+        ha.setProperty(DEVICE_ID, 'start_temperature', 'command', '170')
+        ha.setProperty(DEVICE_ID, 'start_duration', 'command', '20')
+        assert.equal(ha.devices[DEVICE_ID].properties['start_temperature-'], 170)
+        assert.equal(ha.devices[DEVICE_ID].properties['start_duration-'], 20)
+
+        ha.setProperty(DEVICE_ID, 'start', 'command', '')
+
+        assert.equal(thinq.outbox.length, 1)
+        // Real capture (2026-08-12): AA 17 F0 43 20 0B 18 00 00 00 01 00 AA 00 14 00
+        // 00 00 00 00 A3 BB - 0xAA=170C, 0x14=20min, otherwise byte-identical to the
+        // 200C/15min sample - confirming these are the only two variable bytes.
+        assert.equal(thinq.outbox[0].toString('hex'), 'aa17f043200b180000000100aa0014000000000000a3bb')
+
+        dev.drop()
+    })
+
+    test('stop button sends the confirmed stop command', () => {
+        const { ha, thinq, dev } = makeDevice()
+
+        ha.setProperty(DEVICE_ID, 'stop', 'command', '')
+
+        assert.equal(thinq.outbox.length, 1)
+        // Real capture (2026-08-12): AA 07 F0 44 00 B0 BB
+        assert.equal(thinq.outbox[0].toString('hex'), 'aa07f04400b0bb')
+
+        dev.drop()
+    })
+
     test('done/cancelled: status=off, remaining=0', () => {
         const { ha, thinq, dev } = makeDevice()
 
@@ -184,7 +233,9 @@ describe(MODEL_ID, () => {
         thinq.emit('data', buf('AA0040EC1234BB')) // wrong length
         thinq.emit('data', buf('AA04AABBBBBB')) // too short
 
-        assert.deepEqual(ha.devices[DEVICE_ID].properties, {})
+        // Only the staged start defaults (published at construction) should be
+        // present - no device-state properties from any of the malformed frames.
+        assert.deepEqual(ha.devices[DEVICE_ID].properties, { 'start_temperature-': 200, 'start_duration-': 15 })
 
         dev.drop()
     })

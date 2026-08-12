@@ -23,13 +23,42 @@ import log from '@/util/logging'
  *                 part of this state protocol), so the "remote enabled" flag is
  *                 session state on the cloud side, not appliance telemetry.
  *   0x40 0xEC  – double state record (230 = 2×115 bytes); R1=prev, R2=current
+ *   0x40 0x31  – identity: null-terminated ASCII PCB model string ("SAA43884301"
+ *                 confirmed live 2026-08-12) followed by binary telemetry, sent at
+ *                 startup alongside the first 0x40EB
  *   0x40 0x72  – event notification
- *   0x40 0x00  – ack/response
+ *   0x40 0x00  – ack/response - CONFIRMED 2026-08-12 as the device's ack for any
+ *                 0xF0-family command (see below), echoing that command's cmd2 byte
+ *                 back as its 1-byte payload
+ *
+ * Packet types (cloud -> device, cmd1=0xF0 - the same generic cross-device session
+ * channel as the Remote Start handshake, not part of this device's own 0x40 family):
+ *   0xF0 0x43  – start a cook. Payload: `20 0b 18 00 00 00 01 00 <temp> 00 <min> 00
+ *                 00 00 00 00 00` (17 data bytes). CONFIRMED across two live air-fry
+ *                 starts 2026-08-12 - 200C/15min and 170C/20min - which differed in
+ *                 ONLY the temp byte (offset 8, raw = whole degrees C) and minutes
+ *                 byte (offset 10, raw = whole minutes); every other byte was
+ *                 identical between the two. buildStartCommand() below builds this
+ *                 for arbitrary temp/minutes. STILL UNCONFIRMED: whether byte 0
+ *                 (0x20 in both samples) is a function selector that would need to
+ *                 change for steam-proof or another mode - we only have air-fry
+ *                 samples so far, so this command is air-fry only until a
+ *                 steam-proof (or other function) start is captured for comparison.
+ *   0xF0 0x44  – stop the current cook. CONFIRMED 2026-08-12: payload is a single
+ *                 0x00 byte.
  *
  * 115-byte state record layout (0-indexed within record):
  *   [0..13]  00 00 01 00 00 01 02 00 FF 03 00 02 00 00  constant header
- *   [14]     state      0=off  1=cooking  2=stopping/finishing
- *   [15]     mode       0x81 while timer is active, 0x00 otherwise
+ *   [14]     state      0=off  1=cooking (steam-proof)  2=cooking (air fry) or a
+ *                        brief transitional state at stop - CORRECTED 2026-08-12: a
+ *                        live air-fry run held state=2 continuously for its entire
+ *                        ~15 min duration, not just briefly "stopping/finishing" as
+ *                        previously documented from a single steam-proof capture.
+ *                        state ties to `mode` (below) to tell functions apart.
+ *   [15]     mode       0x81 while a steam-proof timer is active, 0x98 while an air
+ *                        fry timer is active (CONFIRMED 2026-08-12), 0x00 otherwise -
+ *                        i.e. this is a function selector, not just an "is running"
+ *                        flag as previously documented
  *   [16]     seconds    countdown seconds (0–59)
  *   [17]     minutes    countdown minutes
  *   [18]     00         constant
@@ -50,10 +79,43 @@ import log from '@/util/logging'
  *
  * Observed lifecycle (WS7D7631WB, 15-min steam-proof at 30°C):
  *   Off:      state=0, everything zero except amb_temp
- *   Cooking:  state=1, timer counts down from set_min:00, cur_temp rises toward set_temp
+ *   Cooking:  state=1, mode=0x81, timer counts down from set_min:00, cur_temp rises
+ *             toward set_temp
  *   Stopping: state=2 (brief), seen in R1 when R2 already shows state=0
  *   Done:     state=0, all cooking fields zero
+ *
+ * Second/third lifecycle (2026-08-12, remote-started air fry via 0xF043 - 200C/15min,
+ * then separately 170C/20min):
+ *   Cooking:  state=2, mode=0x98, timer counts down from set_min:00 - cur_temp stayed
+ *             0 for the ENTIRE run both times (unlike the steam-proof capture, where
+ *             it rose toward set_temp) - open question, not yet explained
+ *   Stopped early via 0xF044 partway through the first timer -> state=0 immediately,
+ *   same as a natural completion
  */
+
+// Fixed bytes of the 0xF0 0x43 start-cook payload, confirmed identical across both
+// air-fry samples (200C/15min and 170C/20min) - see the doc note above. `null`
+// marks where temp/minutes go.
+const START_COOKING_TEMPLATE: (number | null)[] = [
+    0x20,
+    0x0b,
+    0x18,
+    0x00,
+    0x00,
+    0x00,
+    0x01,
+    0x00,
+    null,
+    0x00,
+    null,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+]
+const STOP = 'F04400'
 
 export default class Device extends HADevice {
     private state: number = -1
@@ -64,6 +126,12 @@ export default class Device extends HADevice {
     private curTemp: number = 0
     private ambTemp: number = 0
 
+    // Staged start parameters (air fry only - see doc note above), settable from HA
+    // before pressing Start, mirroring the ThinQ app's set-then-start flow. Defaults
+    // to the first confirmed sample.
+    private startTemp: number = 200
+    private startMinutes: number = 15
+
     private lastStatus: string = ''
     private lastRemaining: number = -1
     private lastSetMin: number = -1
@@ -71,13 +139,61 @@ export default class Device extends HADevice {
     private lastCurTemp: number = -1
     private lastAmbTemp: number = -1
 
-    constructor(HA: Connection, thinq: Thinq2Device, meta: Metadata) {
+    constructor(
+        HA: Connection,
+        private readonly thinq: Thinq2Device,
+        meta: Metadata,
+    ) {
         super(HA, thinq.id)
         thinq.on('data', (data: Buffer) => this.processData(data))
 
         const config: DeviceDiscovery = allowExtendedType({
             ...HADevice.config(meta, { name: 'LG Steam Oven' }),
             components: {
+                start_temperature: {
+                    platform: 'number',
+                    unique_id: '$deviceid-start-temperature',
+                    name: 'Air fry start temperature',
+                    icon: 'mdi:thermometer',
+                    device_class: 'temperature',
+                    unit_of_measurement: '°C',
+                    // Sane UI bounds around the two confirmed samples (170, 200) -
+                    // not confirmed hardware limits.
+                    min: 40,
+                    max: 230,
+                    step: 5,
+                    state_topic: '$this/start_temperature-',
+                    command_topic: '$this/start_temperature/set',
+                },
+                start_duration: {
+                    platform: 'number',
+                    unique_id: '$deviceid-start-duration',
+                    name: 'Air fry start duration',
+                    icon: 'mdi:timer-sand',
+                    device_class: 'duration',
+                    unit_of_measurement: 'min',
+                    min: 1,
+                    max: 180,
+                    step: 1,
+                    state_topic: '$this/start_duration-',
+                    command_topic: '$this/start_duration/set',
+                },
+                start: {
+                    platform: 'button',
+                    unique_id: '$deviceid-start',
+                    name: 'Start air fry',
+                    icon: 'mdi:play-circle-outline',
+                    command_topic: '$this/start/set',
+                    payload_press: '',
+                },
+                stop: {
+                    platform: 'button',
+                    unique_id: '$deviceid-stop',
+                    name: 'Stop',
+                    icon: 'mdi:stop-circle-outline',
+                    command_topic: '$this/stop/set',
+                    payload_press: '',
+                },
                 status: {
                     platform: 'sensor',
                     unique_id: '$deviceid-status',
@@ -144,6 +260,8 @@ export default class Device extends HADevice {
         })
 
         this.setConfig(config)
+        this.HA.publishProperty(this.id, 'start_temperature-', this.startTemp)
+        this.HA.publishProperty(this.id, 'start_duration-', this.startMinutes)
     }
 
     processData(buf: Buffer) {
@@ -226,7 +344,40 @@ export default class Device extends HADevice {
         if (this.ambTemp > 0) this.HA.publishProperty(this.id, 'ambient_temperature-', this.ambTemp)
     }
 
-    setProperty(_prop: string, _value: string) {
-        // No writable properties yet.
+    setProperty(prop: string, value: string) {
+        if (prop === 'start_temperature') {
+            this.startTemp = Number(value)
+            this.HA.publishProperty(this.id, 'start_temperature-', this.startTemp)
+        } else if (prop === 'start_duration') {
+            this.startMinutes = Number(value)
+            this.HA.publishProperty(this.id, 'start_duration-', this.startMinutes)
+        } else if (prop === 'start') {
+            this.send(this.buildStartCommand(this.startTemp, this.startMinutes))
+        } else if (prop === 'stop') {
+            this.send(Buffer.from(STOP, 'hex'))
+        }
+    }
+
+    // Builds the 0xF0 0x43 start-cook command for arbitrary temp (whole °C) /
+    // minutes, from the template confirmed across two air-fry samples. Air fry
+    // only - see the doc note on 0xF0 0x43 above.
+    private buildStartCommand(tempC: number, minutes: number): Buffer {
+        const data = START_COOKING_TEMPLATE.map((b, i) => {
+            if (b !== null) return b
+            return i === 8 ? tempC & 0xff : minutes & 0xff
+        })
+        return Buffer.concat([Buffer.from([0xf0, 0x43]), Buffer.from(data)])
+    }
+
+    // AA <len> <inner> <checksum> BB framing, verified against real captures of both
+    // the 0x40-family (device->cloud) and 0xF0-family (cloud->device) packets: len
+    // is inner.length+4, and checksum is (sum of every byte from AA through the
+    // trailing 00 00 placeholder, inclusive) & 0xff, XORed with 0x55.
+    private send(inner: Buffer) {
+        const packet = Buffer.concat([Buffer.from([0xaa, inner.length + 4]), inner, Buffer.from([0x00, 0x00])])
+        const sum = packet.reduce((pv, cv) => pv + cv, 0)
+        packet[packet.length - 2] = (sum & 0xff) ^ 0x55
+        packet[packet.length - 1] = 0xbb
+        this.thinq.send_packet(packet)
     }
 }
