@@ -159,6 +159,17 @@ export class Broker extends TypedEmitter<BrokerEvents> {
             client.destroy()
         })
 
+        // MQTT spec convention: the server should allow ~1.5x the client's declared
+        // keepalive before considering the connection dead, instead of one fixed
+        // timeout for every device. A device with a longer keepalive (or one that's
+        // briefly late for any other reason, e.g. a real-world Wi-Fi hiccup) previously
+        // got dropped the moment it crossed our hardcoded 5 minutes, with nothing on
+        // our end to signal it to reconnect - so it would just look "connected, then
+        // silently gone" until the appliance's own logic (if any) noticed and retried.
+        mqtt.on('connect', (packet) => {
+            if (packet.keepalive) stream.setTimeout(Math.max(1000 * 60 * 5, packet.keepalive * 1500))
+        })
+
         client.on('destroy', (lwt: LWT) => {
             if (lwt)
                 this.publish(
