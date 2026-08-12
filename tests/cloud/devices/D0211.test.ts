@@ -17,8 +17,7 @@ const META: Metadata = { modelId: MODEL_ID, modelName: 'DB365TXS', swVersion: '1
 // 32_EC double-record packets carry (previous, current); we consume R2 (data[26..51]).
 
 // Single record, startup: state=1 (standby), v1=v2=821 (sentinel — no program selected).
-const STANDBY_HEX =
-    'AA2032EB001801000003350500033500001C000202010000000000000000C3BB'
+const STANDBY_HEX = 'AA2032EB001801000003350500033500001C000202010000000000000000C3BB'
 
 // Double record: R1=state=1,v2=18 → R2=state=2,sub=2,v2=18 (cycle just started, 18 min remaining).
 const RUNNING_START_HEX =
@@ -138,6 +137,9 @@ describe(MODEL_ID, () => {
         assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'off')
         // state=0 → remaining reported as 0 regardless of v2 field value
         assert.equal(ha.devices[DEVICE_ID].properties['remaining-'], 0)
+        // state=0 → duration also reset, even though the real device leaves v1=18
+        // (its last cycle's length) unchanged in the DONE_HEX record itself
+        assert.equal(ha.devices[DEVICE_ID].properties['duration-'], 0)
 
         dev.drop()
     })
@@ -198,9 +200,19 @@ describe(MODEL_ID, () => {
         const { ha, thinq, dev } = makeDevice()
 
         // wrong start byte
-        thinq.emit('data', buf('BB3A32EC001802020000120600000E00001C000202010000000000000000001802020000120600000D00001C0002020100000000000000009CBB'))
+        thinq.emit(
+            'data',
+            buf(
+                'BB3A32EC001802020000120600000E00001C000202010000000000000000001802020000120600000D00001C0002020100000000000000009CBB',
+            ),
+        )
         // wrong length
-        thinq.emit('data', buf('AA0032EC001802020000120600000E00001C000202010000000000000000001802020000120600000D00001C0002020100000000000000009CBB'))
+        thinq.emit(
+            'data',
+            buf(
+                'AA0032EC001802020000120600000E00001C000202010000000000000000001802020000120600000D00001C0002020100000000000000009CBB',
+            ),
+        )
         // too short
         thinq.emit('data', buf('AA04AABBBBBB'))
 

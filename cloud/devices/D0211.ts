@@ -19,15 +19,23 @@ import log from '@/util/logging'
  *   0x32 0xEC  – double state record (52 = 2×26 bytes); R1=prev, R2=current
  *   0x32 0x31  – identity: null-terminated ASCII PCB model strings
  *                 "SAA41263925" (main control PCB), "SAA41261020" (inverter PCB)
- *   0x32 0x72  – short event (3 bytes); 0x0066/0x0067 at cycle start,
- *                 0x0000 near cycle end (HYPOTHESIS: door lock/unlock events)
- *   0x32 0xD8  – single-byte event; 0x02 observed near end of cycle
+ *   0x32 0x72  – short event (3 bytes); 0x0066/0x0067 at cycle start, 0x0000 at
+ *                 cycle end. CONFIRMED 2026-08-11 against the official lg_thinq HA
+ *                 integration on the same physical device: 0x0066 lines up with its
+ *                 `notification` event + status->running at cycle start, and 0x0000
+ *                 lines up with its second `notification` event + status->end.
+ *   0x32 0xD8  – single-byte event, fires AT phase-transition boundaries (not just
+ *                 "near end") - CONFIRMED 2026-08-11: 0x0d fired exactly at a
+ *                 rinsing->drying transition (0x02 was previously seen near a
+ *                 finishing transition). Value may select a buzzer/chime sound
+ *                 (the official integration exposes a `chime_sound` entity) rather
+ *                 than identify the transition itself - unconfirmed.
  *   0x32 0x00  – ack/response
  *
  * 26-byte state record layout (0-indexed within the record):
  *   [0..1]  00 18      constant header
  *   [2]     state      0=off/done  1=standby  2=running  3=running(heat)  4=standby  5=finishing
- *   [3]     sub        cycle phase: 0=none  2=washing  3=rinsing  4=drying  5=finishing
+ *   [3]     sub        cycle phase: 0=none  2=washing(?)  3=rinsing  4=drying  5=finishing
  *   [4]     00         constant
  *   [5..6]  v1         BE u16: initial cycle duration in minutes (18 for quick wash;
  *                              0x0335=821 is a sentinel value when no program is selected)
@@ -51,6 +59,18 @@ import log from '@/util/logging'
  *   Drying:    state=2,   sub=4, v2=4→1
  *   Finishing: state=5,   sub=5→0, v2=1
  *   Done:      state=0,   sub=0
+ *
+ * Second capture (2026-08-11, official "Rinse" program, 18 min, cross-checked live
+ * against the official lg_thinq HA integration on the same device): every sub
+ * transition instant lined up exactly with the official integration's own
+ * current_status changes - sub 2->3 with its running->rinsing, sub 3->4 with its
+ * rinsing->drying, state 5 with its ->end. That CONFIRMS sub=3/4 and state=5 as real
+ * phase boundaries. sub=2 stays the one open question: the official status for that
+ * stretch is just the generic "running" (no wash-specific term) - not surprising
+ * since "Rinse" is a rinse-only program, so it's still unclear whether sub=2 means
+ * literal detergent washing or just "the machine's first active/fill phase",
+ * generic across programs. See computeStatus()'s STATUS_WASHING for where this
+ * assumption lives.
  */
 
 // Remaining time sentinel: values ≥ SENTINEL_THRESHOLD indicate no program is
@@ -165,7 +185,11 @@ export default class Device extends HADevice {
         this.remaining = r.readUInt16BE(9)
         this.temp = r[13]
 
-        log('status', this.id, `state=${this.state} sub=${this.sub} duration=${this.duration} remaining=${this.remaining} temp=${this.temp}`)
+        log(
+            'status',
+            this.id,
+            `state=${this.state} sub=${this.sub} duration=${this.duration} remaining=${this.remaining} temp=${this.temp}`,
+        )
         this.publishState()
     }
 
@@ -204,6 +228,10 @@ export default class Device extends HADevice {
     }
 
     private computeDuration(): number {
+        // Mirror computeRemaining()'s off-state reset: the real device does NOT clear
+        // v1 on its own when a cycle finishes (confirmed by DONE_HEX below, state=0 but
+        // v1 still 18) - without this the sensor would stick at the last cycle's length.
+        if (this.state === 0) return 0
         if (this.duration >= SENTINEL_THRESHOLD) return 0
         return this.duration
     }
