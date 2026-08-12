@@ -18,11 +18,21 @@ import HADevice from './base'
  *
  *   0x1f7  power            CONFIRMED  1=on / 0=off
  *   0x1f9  mode             CONFIRMED  observed values 25,26,27,28 (4 modes);
- *                                      written together with 0x256 by the app
+ *                                      written together with 0x256 by the app.
+ *                                      25=heat_pump re-confirmed 2026-08-11 by a live
+ *                                      capture of an explicit "switch to Heat Pump,
+ *                                      60 °C" app action (see 0x256).
  *   0x256  target temp      CONFIRMED  raw = 2 x °C (104->106 == 52->53 °C);
- *                                      the app SET wrote {0x1f9, 0x256} together
+ *                                      the app SET wrote {0x1f9, 0x256} together.
+ *                                      Live 2026-08-11 capture: dragging the app's
+ *                                      slider fired two writes ~40s apart (121/60.5°C
+ *                                      then a settled 120/60°C) — a UI artifact, not a
+ *                                      protocol quirk; don't treat the first as final.
  *   0x255  current temp     CONFIRMED  raw = 2 x °C (measured tank temp, ~57-59 °C)
- *   0x229  temp 2           HYPOTHESIS raw/2 ~23-24 °C (ambient / air-intake?)
+ *   0x229  temp 2           HYPOTHESIS raw/2 ~23-24 °C (ambient / air-intake?) — NOT
+ *                                      the same sensor as the A8 66/67 frame's offset
+ *                                      47 "ambient" slot, which stayed a constant
+ *                                      28.0 °C while this tag moved 46->45 (2026-08-11)
  *   0x221  error code       HYPOTHESIS 0 = ok (same tag the AC uses for errors)
  *   0x2b3  power draw (W)   HYPOTHESIS 0 when idle (same tag the AC uses); a
  *                                      nonzero value is a de-facto "heating now"
@@ -35,8 +45,12 @@ import HADevice from './base'
  *   0x188  run state         CONFIRMED  1=not running (idle/standby); 3 and 5 both
  *                                      seen running (~1978 W, ~312 W). Feeds Status
  *                                      (with 0x2b3 power for faster updates)
- *   0x1ee  hot-water %       CONFIRMED  matches the LG app gauge; 100 full/idle,
- *                                      drops while charging
+ *   0x1ee  hot-water %       CONFIRMED  matches the LG app gauge; 100 full/idle, drops
+ *                                      while charging. Live 2026-08-11 capture: raising
+ *                                      the setpoint 50->60 °C dropped it 60 -> 30 -> 0
+ *                                      within ~90s, well before the tank could have
+ *                                      physically reheated — it tracks estimated
+ *                                      time/energy-to-setpoint, not actual tank charge.
  *   0x355  slow counter     UNKNOWN    drifts down over hours
  *   0x281  =3               IGNORE     periodic heartbeat, not user state
  *
@@ -274,8 +288,22 @@ export default class Device extends TLVDevice {
         // --- Raw sensors for still-undecoded tags, to debug them further in HA. ---
         // These are diagnostic and may be trimmed before an upstream PR.
         const DEBUG_TAGS: [number, string][] = [
-            [0x232, '232'], // variable
-            [0x233, '233'], // variable
+            // Only ever seen in full "values" dumps, never as a standalone push - unlike
+            // the sensor-ish tags above. Both are monotonically increasing counters, but
+            // NOT wall-clock timers: HA history (2026-08-11) over 3 dumps showed
+            //   1748/11 -> 1763/49  over 900.9s (mostly idle/ramp-up)   -> +15 / +38
+            //   1763/49 -> 1770/68  over  101.1s (compressor at step 7-8) -> +7 / +19
+            // The per-second rate is ~4x faster in the second (high compressor-step)
+            // window, ruling out a simple uptime/session-time counter - they track
+            // something compressor-activity-weighted instead (accumulated runtime or
+            // energy is the leading guess). Interestingly 0x233's rate stayed a
+            // consistent ~2.5-2.7x 0x232's rate across both windows, despite the
+            // absolute rate itself varying 4x - hinting they may be two granularities of
+            // the same underlying accumulator rather than unrelated counters. Needs a
+            // capture holding compressor step constant for several minutes to isolate
+            // the driver (elapsed active-time vs power/step-weighted).
+            [0x232, '232'], // HYPOTHESIS: compressor-activity-weighted accumulator
+            [0x233, '233'], // HYPOTHESIS: related accumulator, ~2.5-2.7x 0x232's rate
             [0x289, '289'], // flag (mostly 0)
             [0x1fc, '1fc'], // flag (mostly 0)
             [0x324, '324'], // flag (mostly 0)
@@ -387,24 +415,37 @@ export default class Device extends TLVDevice {
             this.processTLV(TLV.parse(buf.subarray(11, buf.length - 2)))
             return
         }
-        // A8 66 = periodic service-telemetry frame (not TLV); decode separately.
-        if (buf[6] === 0xa8 && buf[7] === 0x66) {
+        // A8 66/A8 67 = periodic service-telemetry frame (not TLV); decode separately.
+        // Live capture (2026-08-11): the device sends A8 66 while idle and switches to
+        // A8 67 (same 129-byte layout, buf[8] no longer fixed) once the compressor is
+        // running — A8 67 was previously dropped here and fell through to the generic
+        // TLVDevice handler, silently losing compressor_freq/fan_speed/coil-temp updates
+        // for the entire duration of a heating cycle.
+        if (buf[6] === 0xa8 && (buf[7] === 0x66 || buf[7] === 0x67)) {
             this.processA866(buf)
             return
         }
         super.processData(buf)
     }
 
-    // Decode the A8 66 service-telemetry frame. Layout (verified across captures),
-    // offsets from the start of the framed packet:
+    // Decode the A8 66 / A8 67 service-telemetry frame. Layout (verified across
+    // captures, including an A8 66->A8 67 transition at mode/setpoint change), offsets
+    // from the start of the framed packet:
     //   [16..24] active block, zero when idle; when running:
     //            02 00 <freq> <freq> <aux16> <aux16> 00  (freq in Hz, aux ramps too)
     //   [39..48] five u16 temperatures x10 °C: water, coil1, coil2, setpoint, ambient
+    //            (offset 39 tracks 0x255 and offset 45 tracks 0x256 exactly - confirmed
+    //            by a live setpoint change 50->60 °C landing on both simultaneously;
+    //            offset 47 stayed a constant 28.0 °C through an idle->heating transition
+    //            where 0x229 moved, so it's a different sensor than 0x229 - still just a
+    //            HYPOTHESIS for "ambient")
     //   the "<00 03 XX>" right before the ASCII model string = filter hours used
-    // Guarded by fixed markers so a malformed/short frame is ignored.
+    // buf[8] is NOT a fixed frame marker - it varies (seen 0x2e on A8 66, 0x02/0x03 on
+    // A8 67) and looks like a rolling counter/sub-type byte instead. Guarded by the
+    // fixed trailer markers [25]/[26] so a malformed/short frame is still ignored.
     processA866(buf: Buffer) {
         const u16 = (i: number) => (buf[i] << 8) | buf[i + 1]
-        if (buf.length < 50 || buf[8] !== 0x2e || buf[25] !== 0x07 || buf[26] !== 0x01) return
+        if (buf.length < 50 || buf[25] !== 0x07 || buf[26] !== 0x01) return
 
         const running = buf[16] !== 0 // active block populated only while running
         this.HA.publishProperty(this.id, 'compressor_freq-', running ? buf[18] : 0)

@@ -130,6 +130,29 @@ describe(MODEL_ID, () => {
         dev.drop()
     })
 
+    test('A8 67 telemetry frame (same layout as A8 66) publishes compressor freq and coil temps', (t) => {
+        const { ha, thinq, dev } = buildReadyDevice(t)
+
+        // Real A8 67 frame captured mid-heating (2026-08-11), right after an A8 66 idle
+        // frame from the same session — same 129-byte layout, but buf[7]=0x67 and
+        // buf[8]=0x02 instead of the A8 66's fixed 0x2e. Previously fell through to the
+        // generic TLVDevice handler and was silently dropped.
+        const A867_HEX =
+            '000004000000A8670201740A010F02B402001E1E01CC01CC0007011901000101' +
+            'FD00001E12030001E5017201BE025801180008760008760000000008765748323753545232' +
+            '000000000000000000000000000000000000003530375441574D4D523231370000000000' +
+            '000000000000000000004E86468C4476760144767704D251'
+        thinq.emit('data', buf(A867_HEX))
+        tickMockTimers(t, 1000)
+
+        assert.equal(ha.getProperty(DEVICE_ID, 'compressor_freq', 'state'), 30)
+        assert.equal(ha.getProperty(DEVICE_ID, 'fan_speed', 'state'), 460)
+        assert.equal(ha.getProperty(DEVICE_ID, 'coil_temp1', 'state'), 37)
+        assert.equal(ha.getProperty(DEVICE_ID, 'coil_temp2', 'state'), 44.6)
+
+        dev.drop()
+    })
+
     test('heating-cycle dump reports power and Status=heating', (t) => {
         const { ha, thinq, dev } = buildReadyDevice(t)
 
