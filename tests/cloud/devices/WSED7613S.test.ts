@@ -262,8 +262,8 @@ describe(MODEL_ID, () => {
         const { thinq, dev } = makeDevice()
         thinq.resetRecorder()
 
-        tickMockTimers(t, 2 * 60 * 1000)
-        assert.equal(thinq.outbox.length, 1, 'first keepalive ping sent after 2 minutes')
+        tickMockTimers(t, 60 * 1000)
+        assert.equal(thinq.outbox.length, 1, 'first keepalive ping sent after 1 minute')
         // Real capture (2026-08-12): the confirmed 0xF0ED query payload.
         assert.equal(
             thinq.outbox[0].toString('hex'),
@@ -272,13 +272,13 @@ describe(MODEL_ID, () => {
 
         // No reply within the 10s window -> marked asleep, no further spam
         tickMockTimers(t, 10 * 1000)
-        tickMockTimers(t, 2 * 60 * 1000)
+        tickMockTimers(t, 60 * 1000)
         assert.equal(thinq.outbox.length, 1, 'no further ping sent once one goes unanswered')
 
         // Device shows a real sign of life on its own (e.g. woken by the door)
         thinq.emit('data', buf(IDLE_HEX))
 
-        tickMockTimers(t, 2 * 60 * 1000)
+        tickMockTimers(t, 60 * 1000)
         assert.equal(thinq.outbox.length, 2, 'pinging resumes after the device replies on its own')
 
         dev.drop()

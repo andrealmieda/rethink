@@ -210,7 +210,7 @@ const REFRESH_QUERY = 'F0ED114101000000181A1017181C272E2F33505356595C00000000000
 // How long to wait for a reply to a keepalive query before assuming the
 // appliance's WiFi has gone to sleep and pausing further pings.
 const KEEPALIVE_REPLY_TIMEOUT_MS = 10 * 1000
-const KEEPALIVE_INTERVAL_MS = 2 * 60 * 1000
+const KEEPALIVE_INTERVAL_MS = 60 * 1000
 
 export default class Device extends HADevice {
     private state: number = -1
