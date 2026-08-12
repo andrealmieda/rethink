@@ -99,6 +99,24 @@ import log from '@/util/logging'
  * literal detergent washing or just "the machine's first active/fill phase",
  * generic across programs. See computeStatus()'s STATUS_WASHING for where this
  * assumption lives.
+ *
+ * Third capture (2026-08-12, the same Auto/soil-sensing cycle from above, followed
+ * through to completion): the finishing sequence generalizes past the quick-wash
+ * case - Drying (state=2,sub=4) -> Finishing (state=5,sub=5) -> a one-frame
+ * transient state=4,sub=0 (NEW: state=4 isn't exclusively a standby marker; here it
+ * appears for a single frame during shutdown) -> Done (state=0,sub=0). v1 stayed at
+ * 791 unchanged through every one of those frames, including the final state=0 one -
+ * the device never resets it itself even at the very end of a long adaptive cycle,
+ * confirming computeDuration()'s explicit state===0 reset is required in general, not
+ * just for the quick-wash capture it was first observed in. Separately, temp cooled
+ * 22->20 during drying/finishing (no spike at shutdown) - contrasts with a brief
+ * 20->28->20 heat-burst spike seen mid-cycle during rinsing in this same run, so the
+ * heat burst looks tied to a specific wash/rinse sub-phase rather than to shutdown.
+ * Also saw a new 0x32d8 event value (0x0f; previously only 0x0d and 0x02 observed) -
+ * logged, meaning still unconfirmed. The v1/remaining-to-real-minutes ratio for Auto
+ * mode is still unresolved: this capture started mid-cycle (v1 already at 791 by the
+ * first sample), so there's no true wire-vs-wall-clock baseline from cycle start to
+ * derive a formula from.
  */
 
 // Remaining time sentinel: values ≥ SENTINEL_THRESHOLD indicate no program is
