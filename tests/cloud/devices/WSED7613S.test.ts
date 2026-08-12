@@ -69,6 +69,8 @@ describe(MODEL_ID, () => {
         assert.equal(comps.set_temperature?.device_class, 'temperature')
         assert.equal(comps.temperature?.entity_category, 'diagnostic')
 
+        assert.equal(comps.start_function?.platform, 'select')
+        assert.deepEqual(comps.start_function?.options, ['air_fry', 'top_bottom_heat'])
         assert.equal(comps.start_temperature?.platform, 'number')
         assert.equal(comps.start_duration?.platform, 'number')
         assert.equal(comps.start?.platform, 'button')
@@ -183,6 +185,42 @@ describe(MODEL_ID, () => {
         dev.drop()
     })
 
+    test('setting start_function to top_bottom_heat changes the <func> byte', () => {
+        const { ha, thinq, dev } = makeDevice()
+
+        ha.setProperty(DEVICE_ID, 'start_function', 'command', 'top_bottom_heat')
+        ha.setProperty(DEVICE_ID, 'start_temperature', 'command', '170')
+        ha.setProperty(DEVICE_ID, 'start_duration', 'command', '15')
+        assert.equal(ha.devices[DEVICE_ID].properties['start_function-'], 'top_bottom_heat')
+
+        ha.setProperty(DEVICE_ID, 'start', 'command', '')
+
+        assert.equal(thinq.outbox.length, 1)
+        // Real capture (2026-08-12): AA 17 F0 43 20 0B 03 00 00 00 01 00 AA 00 0F 00
+        // 00 00 00 00 89 BB - <func>=0x03 instead of air fry's 0x18, otherwise the
+        // same template.
+        assert.equal(thinq.outbox[0].toString('hex'), 'aa17f043200b030000000100aa000f00000000000089bb')
+
+        dev.drop()
+    })
+
+    test('adjusting temp/duration mid-run sends the same command as starting', () => {
+        const { ha, thinq, dev } = makeDevice()
+
+        ha.setProperty(DEVICE_ID, 'start_function', 'command', 'top_bottom_heat')
+        ha.setProperty(DEVICE_ID, 'start_temperature', 'command', '190')
+        ha.setProperty(DEVICE_ID, 'start_duration', 'command', '20')
+        ha.setProperty(DEVICE_ID, 'start', 'command', '')
+
+        assert.equal(thinq.outbox.length, 1)
+        // Real capture (2026-08-12): the app adjusted a running 170C/15min
+        // top/bottom-heat cook to 190C/20min with this exact command - no separate
+        // "update" command exists, it's the same 0xF043.
+        assert.equal(thinq.outbox[0].toString('hex'), 'aa17f043200b030000000100be0014000000000000a0bb')
+
+        dev.drop()
+    })
+
     test('stop button sends the confirmed stop command', () => {
         const { ha, thinq, dev } = makeDevice()
 
@@ -235,7 +273,11 @@ describe(MODEL_ID, () => {
 
         // Only the staged start defaults (published at construction) should be
         // present - no device-state properties from any of the malformed frames.
-        assert.deepEqual(ha.devices[DEVICE_ID].properties, { 'start_temperature-': 200, 'start_duration-': 15 })
+        assert.deepEqual(ha.devices[DEVICE_ID].properties, {
+            'start_function-': 'air_fry',
+            'start_temperature-': 200,
+            'start_duration-': 15,
+        })
 
         dev.drop()
     })

@@ -26,39 +26,53 @@ import log from '@/util/logging'
  *   0x40 0x31  – identity: null-terminated ASCII PCB model string ("SAA43884301"
  *                 confirmed live 2026-08-12) followed by binary telemetry, sent at
  *                 startup alongside the first 0x40EB
- *   0x40 0x72  – event notification
+ *   0x40 0x72  – event notification, 13 data bytes `<b0> <flag> 0a 00...00`.
+ *                 CONFIRMED 2026-08-12: flag=0x01 fires exactly when cur_temp first
+ *                 reaches set_temp during a top/bottom-heat preheat (matches the
+ *                 oven's own audible chime) - state flips 1->2 in the very next
+ *                 record at the same instant. flag=0x10 seen once, much earlier,
+ *                 meaning unconfirmed.
  *   0x40 0x00  – ack/response - CONFIRMED 2026-08-12 as the device's ack for any
  *                 0xF0-family command (see below), echoing that command's cmd2 byte
  *                 back as its 1-byte payload
  *
  * Packet types (cloud -> device, cmd1=0xF0 - the same generic cross-device session
  * channel as the Remote Start handshake, not part of this device's own 0x40 family):
- *   0xF0 0x43  – start a cook. Payload: `20 0b 18 00 00 00 01 00 <temp> 00 <min> 00
- *                 00 00 00 00 00` (17 data bytes). CONFIRMED across two live air-fry
- *                 starts 2026-08-12 - 200C/15min and 170C/20min - which differed in
- *                 ONLY the temp byte (offset 8, raw = whole degrees C) and minutes
- *                 byte (offset 10, raw = whole minutes); every other byte was
- *                 identical between the two. buildStartCommand() below builds this
- *                 for arbitrary temp/minutes. STILL UNCONFIRMED: whether byte 0
- *                 (0x20 in both samples) is a function selector that would need to
- *                 change for steam-proof or another mode - we only have air-fry
- *                 samples so far, so this command is air-fry only until a
- *                 steam-proof (or other function) start is captured for comparison.
+ *   0xF0 0x43  – start a cook, OR update temp/time on an already-running one (same
+ *                 command works for both - confirmed live 2026-08-12 by adjusting a
+ *                 running top/bottom-heat cook from 170C/15min to 190C/20min with a
+ *                 second 0xF043). Payload: `20 0b <func> 00 00 00 01 00 <temp> 00
+ *                 <min> 00 00 00 00 00 00` (17 data bytes). CONFIRMED across four
+ *                 live starts 2026-08-12 (air fry 200C/15min, air fry 170C/20min,
+ *                 top/bottom-heat 170C/15min, top/bottom-heat 190C/20min - the last
+ *                 being the running-adjustment case): <func> (offset 2) is
+ *                 0x18=air fry, 0x03=top/bottom heat; <temp> (offset 8, whole °C)
+ *                 and <min> (offset 10, whole minutes) vary independently; every
+ *                 other byte was identical across all four. buildStartCommand()
+ *                 below builds this for any (func, temp, minutes). Only these two
+ *                 functions are confirmed - others (steam-proof, grill, etc.) may
+ *                 use different <func> values we haven't captured yet.
  *   0xF0 0x44  – stop the current cook. CONFIRMED 2026-08-12: payload is a single
  *                 0x00 byte.
  *
  * 115-byte state record layout (0-indexed within record):
  *   [0..13]  00 00 01 00 00 01 02 00 FF 03 00 02 00 00  constant header
- *   [14]     state      0=off  1=cooking (steam-proof)  2=cooking (air fry) or a
- *                        brief transitional state at stop - CORRECTED 2026-08-12: a
- *                        live air-fry run held state=2 continuously for its entire
- *                        ~15 min duration, not just briefly "stopping/finishing" as
- *                        previously documented from a single steam-proof capture.
- *                        state ties to `mode` (below) to tell functions apart.
- *   [15]     mode       0x81 while a steam-proof timer is active, 0x98 while an air
- *                        fry timer is active (CONFIRMED 2026-08-12), 0x00 otherwise -
- *                        i.e. this is a function selector, not just an "is running"
- *                        flag as previously documented
+ *   [14]     state      0=off; 1=preheating/running; 2=at temperature (once cur_temp
+ *                        reaches set_temp - CONFIRMED 2026-08-12 via a top/bottom
+ *                        heat preheat, causally tied to the 0x4072 flag=0x01 event
+ *                        below) or a brief transitional state at stop. `mode`, not
+ *                        `state`, is what identifies which function is running -
+ *                        CORRECTED 2026-08-12: a live air-fry run held state=2
+ *                        continuously for its entire ~15 min duration (it may not
+ *                        have a distinct preheat phase, or reports it differently -
+ *                        cur_temp stayed 0 throughout), not just briefly
+ *                        "stopping/finishing" as previously documented from a single
+ *                        steam-proof capture.
+ *   [15]     mode       function selector while a timer is active, 0x00 otherwise -
+ *                        CONFIRMED 2026-08-12: 0x81=steam-proof, 0x83=top/bottom
+ *                        heat, 0x98=air fry. Not the same byte values as the 0xF043
+ *                        command's own <func> selector (0x18/0x03) - this is a
+ *                        separate enum in the state record.
  *   [16]     seconds    countdown seconds (0–59)
  *   [17]     minutes    countdown minutes
  *   [18]     00         constant
@@ -91,15 +105,33 @@ import log from '@/util/logging'
  *             it rose toward set_temp) - open question, not yet explained
  *   Stopped early via 0xF044 partway through the first timer -> state=0 immediately,
  *   same as a natural completion
+ *
+ * Fourth lifecycle (2026-08-12, remote-started top/bottom heat via 0xF043 at
+ * 170C/15min, then adjusted mid-run to 190C/20min with a second 0xF043):
+ *   Preheating: state=1, mode=0x83, cur_temp rising toward set_temp (this function
+ *   does report a rising cur_temp, unlike air fry) - the mid-run adjustment took
+ *   effect without a stop/restart.
+ *   At temperature: the moment cur_temp==set_temp, a 0x4072 event (flag=0x01) fires
+ *   and state flips 1->2 in the same instant - state=2 here means "at temperature",
+ *   not "air fry" as in the second lifecycle; it's a shared preheat/cook phase
+ *   marker, and `mode` is what actually identifies the function.
  */
 
-// Fixed bytes of the 0xF0 0x43 start-cook payload, confirmed identical across both
-// air-fry samples (200C/15min and 170C/20min) - see the doc note above. `null`
-// marks where temp/minutes go.
+// Cooking functions confirmed for the 0xF0 0x43 command's <func> byte (offset 2) -
+// see the doc note above. Only these two are confirmed; others may exist.
+const COOKING_FUNCTIONS = {
+    air_fry: 0x18,
+    top_bottom_heat: 0x03,
+} as const
+type CookingFunction = keyof typeof COOKING_FUNCTIONS
+
+// Fixed bytes of the 0xF0 0x43 start-cook payload, confirmed identical across all
+// four live samples (see the doc note above). `null` marks where func/temp/minutes
+// go.
 const START_COOKING_TEMPLATE: (number | null)[] = [
     0x20,
     0x0b,
-    0x18,
+    null,
     0x00,
     0x00,
     0x00,
@@ -126,9 +158,10 @@ export default class Device extends HADevice {
     private curTemp: number = 0
     private ambTemp: number = 0
 
-    // Staged start parameters (air fry only - see doc note above), settable from HA
-    // before pressing Start, mirroring the ThinQ app's set-then-start flow. Defaults
-    // to the first confirmed sample.
+    // Staged start parameters, settable from HA before pressing Start (or while
+    // already running - the same command updates a live cook), mirroring the ThinQ
+    // app's set-then-start flow. Defaults to the first confirmed sample.
+    private startFunction: CookingFunction = 'air_fry'
     private startTemp: number = 200
     private startMinutes: number = 15
 
@@ -150,15 +183,24 @@ export default class Device extends HADevice {
         const config: DeviceDiscovery = allowExtendedType({
             ...HADevice.config(meta, { name: 'LG Steam Oven' }),
             components: {
+                start_function: {
+                    platform: 'select',
+                    unique_id: '$deviceid-start-function',
+                    name: 'Start function',
+                    icon: 'mdi:chef-hat',
+                    options: Object.keys(COOKING_FUNCTIONS),
+                    state_topic: '$this/start_function-',
+                    command_topic: '$this/start_function/set',
+                },
                 start_temperature: {
                     platform: 'number',
                     unique_id: '$deviceid-start-temperature',
-                    name: 'Air fry start temperature',
+                    name: 'Start temperature',
                     icon: 'mdi:thermometer',
                     device_class: 'temperature',
                     unit_of_measurement: '°C',
-                    // Sane UI bounds around the two confirmed samples (170, 200) -
-                    // not confirmed hardware limits.
+                    // Sane UI bounds around the confirmed samples (170-200) - not
+                    // confirmed hardware limits.
                     min: 40,
                     max: 230,
                     step: 5,
@@ -168,7 +210,7 @@ export default class Device extends HADevice {
                 start_duration: {
                     platform: 'number',
                     unique_id: '$deviceid-start-duration',
-                    name: 'Air fry start duration',
+                    name: 'Start duration',
                     icon: 'mdi:timer-sand',
                     device_class: 'duration',
                     unit_of_measurement: 'min',
@@ -181,7 +223,7 @@ export default class Device extends HADevice {
                 start: {
                     platform: 'button',
                     unique_id: '$deviceid-start',
-                    name: 'Start air fry',
+                    name: 'Start / update cook',
                     icon: 'mdi:play-circle-outline',
                     command_topic: '$this/start/set',
                     payload_press: '',
@@ -260,6 +302,7 @@ export default class Device extends HADevice {
         })
 
         this.setConfig(config)
+        this.HA.publishProperty(this.id, 'start_function-', this.startFunction)
         this.HA.publishProperty(this.id, 'start_temperature-', this.startTemp)
         this.HA.publishProperty(this.id, 'start_duration-', this.startMinutes)
     }
@@ -345,25 +388,33 @@ export default class Device extends HADevice {
     }
 
     setProperty(prop: string, value: string) {
-        if (prop === 'start_temperature') {
+        if (prop === 'start_function') {
+            if (value in COOKING_FUNCTIONS) {
+                this.startFunction = value as CookingFunction
+                this.HA.publishProperty(this.id, 'start_function-', this.startFunction)
+            }
+        } else if (prop === 'start_temperature') {
             this.startTemp = Number(value)
             this.HA.publishProperty(this.id, 'start_temperature-', this.startTemp)
         } else if (prop === 'start_duration') {
             this.startMinutes = Number(value)
             this.HA.publishProperty(this.id, 'start_duration-', this.startMinutes)
         } else if (prop === 'start') {
-            this.send(this.buildStartCommand(this.startTemp, this.startMinutes))
+            this.send(this.buildStartCommand(this.startFunction, this.startTemp, this.startMinutes))
         } else if (prop === 'stop') {
             this.send(Buffer.from(STOP, 'hex'))
         }
     }
 
-    // Builds the 0xF0 0x43 start-cook command for arbitrary temp (whole °C) /
-    // minutes, from the template confirmed across two air-fry samples. Air fry
-    // only - see the doc note on 0xF0 0x43 above.
-    private buildStartCommand(tempC: number, minutes: number): Buffer {
+    // Builds the 0xF0 0x43 start/update-cook command for any confirmed function
+    // (see COOKING_FUNCTIONS) and arbitrary temp (whole °C) / minutes, from the
+    // template confirmed across four live samples - see the doc note on 0xF0 0x43
+    // above. The same command both starts a fresh cook and updates one already
+    // running.
+    private buildStartCommand(func: CookingFunction, tempC: number, minutes: number): Buffer {
         const data = START_COOKING_TEMPLATE.map((b, i) => {
             if (b !== null) return b
+            if (i === 2) return COOKING_FUNCTIONS[func]
             return i === 8 ? tempC & 0xff : minutes & 0xff
         })
         return Buffer.concat([Buffer.from([0xf0, 0x43]), Buffer.from(data)])
