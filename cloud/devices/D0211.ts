@@ -34,7 +34,20 @@ import log from '@/util/logging'
  *
  * 26-byte state record layout (0-indexed within the record):
  *   [0..1]  00 18      constant header
- *   [2]     state      0=off/done  1=standby  2=running  3=running(heat)  4=standby  5=finishing
+ *   [2]     state      0=off/done  1=standby(door closed)  2=running  3=running(heat)
+ *                              4=door open  5=finishing. CONFIRMED 2026-08-16 via a
+ *                              live open/close test while in standby: state flipped
+ *                              1->4 the instant the door opened and back 4->1 the
+ *                              instant it closed, with v1/remaining unchanged
+ *                              throughout (both still the 821 sentinel). This
+ *                              retroactively explains the previously-unexplained
+ *                              one-frame state=4 transient seen during the Auto
+ *                              cycle's finishing sequence (2026-08-12 capture,
+ *                              documented below) - many dishwashers auto-crack the
+ *                              door at the end of a cycle to vent steam for drying,
+ *                              which would produce exactly that signal. Whether the
+ *                              door opening mid-wash (not just in standby) behaves
+ *                              the same way is still unconfirmed.
  *   [3]     sub        cycle phase: 0=none  2=washing(?)  3=rinsing  4=drying  5=finishing
  *   [4]     00         constant
  *   [5..6]  v1         BE u16: initial cycle duration in minutes for fixed-length
@@ -55,6 +68,10 @@ import log from '@/util/logging'
  *                              but an Auto cycle held this at 1 for its entire ~95 min
  *                              observed stretch (still running) - so it's evidently
  *                              program-dependent, not a universal standby/running flag.
+ *                              CONFIRMED 2026-08-16: in standby it flips 5 (door
+ *                              closed) <-> 0 (door open) in lockstep with state 1<->4 -
+ *                              so at least in standby this tracks the door too, in
+ *                              addition to/instead of "sequence/step".
  *   [8]     00         constant
  *   [9..10] remaining  BE u16, counts down from v1 - for fixed-length programs this is
  *                              literally minutes; CORRECTED 2026-08-12 for Auto: ticks
@@ -137,11 +154,13 @@ export default class Device extends HADevice {
     private duration: number = 0
     private remaining: number = 0
     private temp: number = 0
+    private door: boolean = false
 
     private lastStatus: string = ''
     private lastDuration: number = -1
     private lastRemaining: number = -1
     private lastTemp: number = -1
+    private lastDoor: boolean = false
 
     constructor(HA: Connection, thinq: Thinq2Device, meta: Metadata) {
         super(HA, thinq.id)
@@ -198,6 +217,13 @@ export default class Device extends HADevice {
                     state_topic: '$this/temperature-',
                     entity_category: 'diagnostic',
                 },
+                door: {
+                    platform: 'binary_sensor',
+                    unique_id: '$deviceid-door',
+                    name: 'Door',
+                    device_class: 'door',
+                    state_topic: '$this/door-',
+                },
             },
         })
 
@@ -230,6 +256,7 @@ export default class Device extends HADevice {
         this.duration = r.readUInt16BE(5)
         this.remaining = r.readUInt16BE(9)
         this.temp = r[13]
+        this.door = this.state === 4
 
         log(
             'status',
@@ -265,8 +292,8 @@ export default class Device extends HADevice {
         }
     }
 
-    // Standby (no cycle running): state 1 with no program dialed in yet reports the
-    // sentinel; state 4 is the other standby variant.
+    // Standby (no cycle running): state 1 is standby with the door closed; state 4 is
+    // the same standby but with the door open (confirmed 2026-08-16 - see doc header).
     private isStandby(): boolean {
         return this.state === 1 || this.state === 4
     }
@@ -300,7 +327,8 @@ export default class Device extends HADevice {
             status === this.lastStatus &&
             duration === this.lastDuration &&
             remaining === this.lastRemaining &&
-            this.temp === this.lastTemp
+            this.temp === this.lastTemp &&
+            this.door === this.lastDoor
         )
             return
 
@@ -308,11 +336,13 @@ export default class Device extends HADevice {
         this.lastDuration = duration
         this.lastRemaining = remaining
         this.lastTemp = this.temp
+        this.lastDoor = this.door
 
         this.HA.publishProperty(this.id, 'status-', status)
         this.HA.publishProperty(this.id, 'duration-', duration)
         this.HA.publishProperty(this.id, 'remaining-', remaining)
         if (this.temp > 0) this.HA.publishProperty(this.id, 'temperature-', this.temp)
+        this.HA.publishProperty(this.id, 'door-', this.door ? 'ON' : 'OFF')
     }
 
     setProperty(_prop: string, _value: string) {

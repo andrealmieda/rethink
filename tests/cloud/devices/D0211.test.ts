@@ -51,6 +51,18 @@ const STANDBY_SENTINEL2_HEX =
 const AUTO_CYCLE_RUNNING_HEX =
     'AA3A32EC0018020200031701000314000014040202010000000000000000001802020003170100031300001404020201000000000000000082BB'
 
+// Real capture (2026-08-16), a live door open/close test while in standby (state=1,
+// v1=v2=821 sentinel, unchanged throughout): R1=state=1 (door closed) -> R2=state=4
+// (door open). Confirms state=4 is specifically "door open", not just an alternate
+// standby flavor.
+const DOOR_OPEN_HEX =
+    'AA3A32EC001801000003350500033500001400020201000000000000000000180400000335000003350000140002020100000000000000001BBB'
+
+// Real capture (2026-08-16), same live test: R1=state=4 (door open, held) -> R2=state=1
+// (door closed again).
+const DOOR_CLOSED_HEX =
+    'AA3A32EC081804000003350000033500001600020201000000000000000000180100000335050003350000160002020100000000000000000FBB'
+
 function makeDevice() {
     const ha = new MockHAConnection()
     const thinq = new MockThinq2Device(DEVICE_ID, META)
@@ -212,6 +224,19 @@ describe(MODEL_ID, () => {
         assert.equal(p['status-'], 'washing')
         assert.equal(p['duration-'], 791, 'v1=791 shown as-is - not suppressed just for being >= 200 while running')
         assert.equal(p['remaining-'], 787, 'remaining=787 shown as-is for the same reason')
+
+        dev.drop()
+    })
+
+    test('door opens and closes while in standby (state 1<->4)', () => {
+        const { ha, thinq, dev } = makeDevice()
+
+        thinq.emit('data', buf(DOOR_OPEN_HEX))
+        assert.equal(ha.devices[DEVICE_ID].properties['door-'], 'ON')
+        assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'standby', 'door open is still standby, not off')
+
+        thinq.emit('data', buf(DOOR_CLOSED_HEX))
+        assert.equal(ha.devices[DEVICE_ID].properties['door-'], 'OFF')
 
         dev.drop()
     })
