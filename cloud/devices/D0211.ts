@@ -18,7 +18,11 @@ import log from '@/util/logging'
  *   0x32 0xEB  – single state record (26 bytes data); sent at startup
  *   0x32 0xEC  – double state record (52 = 2×26 bytes); R1=prev, R2=current
  *   0x32 0x31  – identity: null-terminated ASCII PCB model strings
- *                 "SAA41263925" (main control PCB), "SAA41261020" (inverter PCB)
+ *                 "SAA41263925" (main control PCB), "SAA41261020" (inverter PCB).
+ *                 CONFIRMED 2026-08-16: fires as a re-announce on physical interaction
+ *                 (seen ~2s after the door was opened during a live standby test) -
+ *                 the same "physical interaction triggers a session re-announce"
+ *                 pattern already confirmed for the oven (WSED7613S's 0x4031/0x40EB).
  *   0x32 0x72  – short event (3 bytes); 0x0066/0x0067 at cycle start, 0x0000 at
  *                 cycle end. CONFIRMED 2026-08-11 against the official lg_thinq HA
  *                 integration on the same physical device: 0x0066 lines up with its
