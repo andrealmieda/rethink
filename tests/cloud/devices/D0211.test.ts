@@ -63,6 +63,17 @@ const DOOR_OPEN_HEX =
 const DOOR_CLOSED_HEX =
     'AA3A32EC081804000003350000033500001600020201000000000000000000180100000335050003350000160002020100000000000000000FBB'
 
+// Real capture (2026-08-19), mid-way through a live 2h delayed-start test: state=2,
+// sub=1 (delayed start pending), [11..12]=01:12 (1h18m remaining), flags=5.
+const DELAY_COUNTDOWN_HEX =
+    'AA3A32EC0018020100031701000317011314050202010000000000000000001802010003170100031701121405020201000000000000000050BB'
+
+// Real capture (2026-08-19), the exact instant the delayed start ends: R1=state=2,
+// sub=1, [11..12]=00:01, flags=5 -> R2=state=2, sub=2 (washing begins), [11..12]=00:00,
+// flags=4 (drops the delay-active bit).
+const DELAY_TO_WASHING_HEX =
+    'AA3A32EC001802010003170100031700011405020201000000000000000000180202000317010003170000140402020100000000000000008ABB'
+
 function makeDevice() {
     const ha = new MockHAConnection()
     const thinq = new MockThinq2Device(DEVICE_ID, META)
@@ -237,6 +248,20 @@ describe(MODEL_ID, () => {
 
         thinq.emit('data', buf(DOOR_CLOSED_HEX))
         assert.equal(ha.devices[DEVICE_ID].properties['door-'], 'OFF')
+
+        dev.drop()
+    })
+
+    test('delayed start: counts down, then begins washing when it hits zero', () => {
+        const { ha, thinq, dev } = makeDevice()
+
+        thinq.emit('data', buf(DELAY_COUNTDOWN_HEX))
+        assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'delayed')
+        assert.equal(ha.devices[DEVICE_ID].properties['delay_remaining-'], 78, '1h18m remaining = 78 minutes')
+
+        thinq.emit('data', buf(DELAY_TO_WASHING_HEX))
+        assert.equal(ha.devices[DEVICE_ID].properties['status-'], 'washing')
+        assert.equal(ha.devices[DEVICE_ID].properties['delay_remaining-'], 0)
 
         dev.drop()
     })

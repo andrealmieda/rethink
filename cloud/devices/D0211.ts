@@ -52,7 +52,10 @@ import log from '@/util/logging'
  *                              which would produce exactly that signal. Whether the
  *                              door opening mid-wash (not just in standby) behaves
  *                              the same way is still unconfirmed.
- *   [3]     sub        cycle phase: 0=none  2=washing(?)  3=rinsing  4=drying  5=finishing
+ *   [3]     sub        cycle phase: 0=none  1=delayed start pending  2=washing(?)
+ *                              3=rinsing  4=drying  5=finishing. sub=1 CONFIRMED
+ *                              2026-08-19 via a live 2h delayed-start test - see [11..12]
+ *                              and [14] below.
  *   [4]     00         constant
  *   [5..6]  v1         BE u16: initial cycle duration in minutes for fixed-length
  *                              programs (18 for quick wash; 0x0335=821 is a sentinel
@@ -86,14 +89,30 @@ import log from '@/util/logging'
  *                              checked against the official lg_thinq integration's own
  *                              absolute finish-time: ~3.9x off near cycle start, ~3.26x
  *                              off after the jump - inconsistent, so no known formula).
- *   [11..12] 00 00     constant
+ *   [11..12] 00 00     constant while running/standby - CORRECTED 2026-08-19: during
+ *                              a delayed start (state=2, sub=1) this is instead an
+ *                              hours/minutes-remaining countdown to the actual wash
+ *                              start ([11]=hours, [12]=minutes), confirmed decrementing
+ *                              [12] by exactly 1 per real minute. CONFIRMED the
+ *                              countdown keeps running even through a ~53-min stretch
+ *                              where the device stopped reporting entirely (WiFi sleep,
+ *                              same behavior as the oven) - [11]:[12] read 1:18 right
+ *                              before the silence and 0:26 right after, a real-time-
+ *                              consistent drop across the whole gap, so the sleep is
+ *                              purely a reporting gap, not an operational pause. The
+ *                              instant [11]:[12] hits 0:00, sub flips 1->2 and the
+ *                              normal [9..10] `remaining` field (frozen at v1's value
+ *                              throughout the delay) starts counting down for real.
  *   [13]    temp       HYPOTHESIS: wash temperature in °C; 28 normal, 30 during heat
  *                              burst (quick-wash capture) - held at a constant 20 for
  *                              the entire Auto cycle observed 2026-08-12, no heat burst
  *   [14]    flags      CORRECTED 2026-08-12: NOT "mostly 0, briefly 4 at cycle start" -
  *                              an Auto cycle held this at 4 continuously for its entire
  *                              ~95 min observed stretch, so "briefly" doesn't hold
- *                              universally either; still don't know what it signals
+ *                              universally either; still don't know what it signals.
+ *                              CONFIRMED 2026-08-19: bit 0x01 is set throughout a
+ *                              delayed start (flags=5=4|1) and clears the instant the
+ *                              delay ends and washing actually begins (flags back to 4).
  *   [15..17] 02 02 01  constant
  *   [18..25] 00…       padding
  *
@@ -138,6 +157,15 @@ import log from '@/util/logging'
  * mode is still unresolved: this capture started mid-cycle (v1 already at 791 by the
  * first sample), so there's no true wire-vs-wall-clock baseline from cycle start to
  * derive a formula from.
+ *
+ * Fourth capture (2026-08-19, a 2h delayed-start Auto program, followed end to end):
+ * confirms the whole delayed-start model documented above at [3], [11..12] and [14].
+ * Timeline: state=2,sub=1,flags=5, [11]:[12] counting down from ~1:55 - a ~53-minute
+ * WiFi-sleep gap in the middle (no packets at all) during which the countdown kept
+ * advancing correctly once traffic resumed - down to [11]:[12]=0:00 at 22:56:27 UTC,
+ * at which instant sub flipped 1->2 and flags dropped to 4; the real wash `remaining`
+ * (bytes [9..10], frozen at v1=791 the whole delay) started ticking down for real
+ * (791->790) 43s later. See computeDelayRemaining()/STATUS_DELAYED.
  */
 
 // Remaining time sentinel: values ≥ SENTINEL_THRESHOLD indicate no program is
@@ -146,6 +174,7 @@ const SENTINEL_THRESHOLD = 200
 
 const STATUS_OFF = 'off'
 const STATUS_STANDBY = 'standby'
+const STATUS_DELAYED = 'delayed'
 const STATUS_WASHING = 'washing'
 const STATUS_RINSING = 'rinsing'
 const STATUS_DRYING = 'drying'
@@ -159,12 +188,15 @@ export default class Device extends HADevice {
     private remaining: number = 0
     private temp: number = 0
     private door: boolean = false
+    private delayHours: number = 0
+    private delayMinutes: number = 0
 
     private lastStatus: string = ''
     private lastDuration: number = -1
     private lastRemaining: number = -1
     private lastTemp: number = -1
     private lastDoor: boolean = false
+    private lastDelayRemaining: number = -1
 
     constructor(HA: Connection, thinq: Thinq2Device, meta: Metadata) {
         super(HA, thinq.id)
@@ -182,6 +214,7 @@ export default class Device extends HADevice {
                     options: [
                         STATUS_OFF,
                         STATUS_STANDBY,
+                        STATUS_DELAYED,
                         STATUS_RUNNING,
                         STATUS_WASHING,
                         STATUS_RINSING,
@@ -189,6 +222,16 @@ export default class Device extends HADevice {
                         STATUS_FINISHING,
                     ],
                     state_topic: '$this/status-',
+                },
+                delay_remaining: {
+                    platform: 'sensor',
+                    unique_id: '$deviceid-delay-remaining',
+                    name: 'Delayed start remaining',
+                    icon: 'mdi:clock-start',
+                    device_class: 'duration',
+                    unit_of_measurement: 'min',
+                    state_class: 'measurement',
+                    state_topic: '$this/delay_remaining-',
                 },
                 duration: {
                     platform: 'sensor',
@@ -259,6 +302,8 @@ export default class Device extends HADevice {
         this.sub = r[3]
         this.duration = r.readUInt16BE(5)
         this.remaining = r.readUInt16BE(9)
+        this.delayHours = r[11]
+        this.delayMinutes = r[12]
         this.temp = r[13]
         this.door = this.state === 4
 
@@ -280,6 +325,8 @@ export default class Device extends HADevice {
             case 2:
             case 3: // brief heat-up state, functionally same as running
                 switch (this.sub) {
+                    case 1:
+                        return STATUS_DELAYED
                     case 2:
                         return STATUS_WASHING // HYPOTHESIS: main wash phase
                     case 3:
@@ -322,17 +369,26 @@ export default class Device extends HADevice {
         return this.duration
     }
 
+    // Minutes until a delayed start actually begins washing (state=2, sub=1 only -
+    // see doc header). [11..12] otherwise carry no meaningful countdown.
+    private computeDelayRemaining(): number {
+        if (this.state !== 2 || this.sub !== 1) return 0
+        return this.delayHours * 60 + this.delayMinutes
+    }
+
     private publishState() {
         const status = this.computeStatus()
         const duration = this.computeDuration()
         const remaining = this.computeRemaining()
+        const delayRemaining = this.computeDelayRemaining()
 
         if (
             status === this.lastStatus &&
             duration === this.lastDuration &&
             remaining === this.lastRemaining &&
             this.temp === this.lastTemp &&
-            this.door === this.lastDoor
+            this.door === this.lastDoor &&
+            delayRemaining === this.lastDelayRemaining
         )
             return
 
@@ -341,12 +397,14 @@ export default class Device extends HADevice {
         this.lastRemaining = remaining
         this.lastTemp = this.temp
         this.lastDoor = this.door
+        this.lastDelayRemaining = delayRemaining
 
         this.HA.publishProperty(this.id, 'status-', status)
         this.HA.publishProperty(this.id, 'duration-', duration)
         this.HA.publishProperty(this.id, 'remaining-', remaining)
         if (this.temp > 0) this.HA.publishProperty(this.id, 'temperature-', this.temp)
         this.HA.publishProperty(this.id, 'door-', this.door ? 'ON' : 'OFF')
+        this.HA.publishProperty(this.id, 'delay_remaining-', delayRemaining)
     }
 
     setProperty(_prop: string, _value: string) {
