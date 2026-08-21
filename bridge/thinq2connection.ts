@@ -62,7 +62,7 @@ export class Connection extends TypedEmitter<ConnectionEvents> {
 
         this.mqtt.on('connect', async () => {
             log('bridge', `${this.device.deviceId} connected`)
-            await this.mqtt.subscribe(this.device.state!.subTopic)
+            await this.mqtt.subscribe(this.device.state!.subTopic, { qos: 1 })
 
             // Prefer the real profile the device reported downstream (correct
             // protocolVer, modemType, DeviceType, ...) so the cloud recognises the
