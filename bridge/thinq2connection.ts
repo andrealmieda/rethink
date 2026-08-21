@@ -131,6 +131,7 @@ export class Connection extends TypedEmitter<ConnectionEvents> {
                 data,
                 type: 1,
             }),
+            { qos: 1 },
         )
     }
 
