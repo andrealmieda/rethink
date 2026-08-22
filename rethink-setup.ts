@@ -2,18 +2,22 @@ import * as tls from 'node:tls'
 import jsonSplitter from './util/json_splitter'
 import * as mtosp from './util/mtosp'
 
-if (process.argv.length != 5) {
+if (process.argv.length < 5 || process.argv.length > 7) {
     console.warn(
         `Usage:
-	tsx rethink-setup.ts hostname wifi_ssid wifi_password
+	tsx rethink-setup.ts hostname wifi_ssid wifi_password [country_code] [timezone]
 
 	hostname is usually 192.168.120.254
+	country_code defaults to DE (e.g. PT, US, ...) - this affects the device's own
+	  reported locale/region, which some cloud features (e.g. bridge-mode scheduling)
+	  may depend on matching your actual account country
+	timezone defaults to +0100 (UTC offset, e.g. +0000, -0500)
 `,
     )
     process.exit()
 }
 
-const [host, wifiname, wifipass] = process.argv.slice(2)
+const [host, wifiname, wifipass, countryCode = 'DE', timezone = '+0100'] = process.argv.slice(2)
 
 async function request(xml: string) {
     const socket = await new Promise<tls.TLSSocket>((resolve, reject) => {
@@ -58,7 +62,7 @@ async function thinq1Setup() {
 		<bssid>${b64ssid}</bssid>
 		<security>WPA_PSK</security>
 		<password>${b64password}</password>
-		<subCountryCode>DE</subCountryCode>
+		<subCountryCode>${countryCode}</subCountryCode>
 		<regionalCode>rethink</regionalCode>
 	</data></mTosp>`)
     console.log('response:', resp)
@@ -106,9 +110,9 @@ QwIDAQAB
                             type: 'request',
                             cmd: 'getDeviceInfo',
                             data: {
-                                subCountryCode: 'DE',
+                                subCountryCode: countryCode,
                                 regionalCode: 'eic',
-                                timezone: '+0100',
+                                timezone,
                                 publicKey,
                                 constantConnect: 'Y',
                             },

@@ -27,6 +27,7 @@ export class Connection extends TypedEmitter<ConnectionEvents> {
             cert: state.certificate,
             clientId: this.device.deviceId,
             reconnectPeriod: 0, // no auto-reconnect
+            clean: false, // persistent session: let AWS IoT queue messages sent while we're briefly disconnected/reconnecting, instead of dropping them
         })
 
         this.mqtt.on('message', (topic, message, packet) => {
