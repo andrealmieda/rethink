@@ -487,6 +487,14 @@ export default class Device extends HADevice {
                     state_class: 'measurement',
                     state_topic: '$this/kitchen_timer_remaining-',
                 },
+                kitchen_timer_ends_at: {
+                    platform: 'sensor',
+                    unique_id: '$deviceid-kitchen-timer-ends-at',
+                    name: 'Kitchen timer ends at',
+                    icon: 'mdi:timer-alarm-outline',
+                    device_class: 'timestamp',
+                    state_topic: '$this/kitchen_timer_ends_at-',
+                },
                 kitchen_timer_finished: {
                     platform: 'event',
                     unique_id: '$deviceid-kitchen-timer-finished',
@@ -610,6 +618,16 @@ export default class Device extends HADevice {
         return this.kitchenTimerHours * 3600 + this.kitchenTimerMin * 60 + this.kitchenTimerSec
     }
 
+    // An absolute end time, recomputed from the device's own reported remaining time
+    // on every record (not just once at start) - lets HA render a live-ticking
+    // countdown client-side from a fixed timestamp instead of needing a fresh poll
+    // every time the displayed value should visibly change. Null while no timer is
+    // running.
+    private computeKitchenTimerEndsAt(remainingSeconds: number): string | null {
+        if (remainingSeconds <= 0) return null
+        return new Date(Date.now() + remainingSeconds * 1000).toISOString()
+    }
+
     private publishState() {
         const status = this.computeStatus()
         const remaining = this.computeRemaining()
@@ -645,6 +663,11 @@ export default class Device extends HADevice {
         if (this.ambTemp > 0) this.HA.publishProperty(this.id, 'ambient_temperature-', this.ambTemp)
         this.HA.publishProperty(this.id, 'door-', this.door ? 'ON' : 'OFF')
         this.HA.publishProperty(this.id, 'kitchen_timer_remaining-', kitchenTimerRemaining)
+        this.HA.publishProperty(
+            this.id,
+            'kitchen_timer_ends_at-',
+            this.computeKitchenTimerEndsAt(kitchenTimerRemaining) ?? 'unknown',
+        )
     }
 
     setProperty(prop: string, value: string) {
