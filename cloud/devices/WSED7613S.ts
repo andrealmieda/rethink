@@ -297,10 +297,12 @@ export default class Device extends HADevice {
     private startTemp: number = 200
     private startMinutes: number = 15
 
-    // Staged kitchen-timer duration (total seconds), settable from HA before pressing
-    // Start. Defaults to the first confirmed sample (10s) - see the 0xF0 0x43
-    // kitchen-timer doc note.
-    private kitchenTimerDuration: number = 10
+    // Staged kitchen-timer duration in whole minutes, settable from HA before pressing
+    // Start. Whole minutes rather than raw seconds is a UX choice (a kitchen timer is
+    // normally set to the minute) - the wire protocol itself supports second
+    // granularity (see the 0xF0 0x43 kitchen-timer doc note), this just doesn't
+    // expose it.
+    private kitchenTimerDuration: number = 5
 
     private lastStatus: string = ''
     private lastRemaining: number = -1
@@ -449,12 +451,12 @@ export default class Device extends HADevice {
                     unique_id: '$deviceid-kitchen-timer-duration',
                     name: 'Kitchen timer duration',
                     icon: 'mdi:timer-plus-outline',
-                    unit_of_measurement: 's',
-                    // Seconds and minutes are separate bytes on the wire (see 0xF0
-                    // 0x43 kitchen-timer doc note), so up to 59:59 is representable -
-                    // only 10s and 1:10 are actually confirmed samples.
+                    unit_of_measurement: 'min',
+                    // Whole minutes, matching the wire's single-byte minutes field
+                    // (see 0xF0 0x43 kitchen-timer doc note) - seconds granularity
+                    // exists on the wire but isn't exposed here.
                     min: 1,
-                    max: 3599,
+                    max: 59,
                     step: 1,
                     state_topic: '$this/kitchen_timer_duration-',
                     command_topic: '$this/kitchen_timer_duration/set',
@@ -665,7 +667,7 @@ export default class Device extends HADevice {
             this.kitchenTimerDuration = Number(value)
             this.HA.publishProperty(this.id, 'kitchen_timer_duration-', this.kitchenTimerDuration)
         } else if (prop === 'kitchen_timer_start') {
-            this.send(this.buildKitchenTimerCommand(this.kitchenTimerDuration))
+            this.send(this.buildKitchenTimerCommand(this.kitchenTimerDuration * 60))
         } else if (prop === 'kitchen_timer_cancel') {
             this.send(this.buildKitchenTimerCommand(0))
         }
