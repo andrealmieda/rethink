@@ -31,7 +31,13 @@ import log from '@/util/logging'
  *                 reaches set_temp during a top/bottom-heat preheat (matches the
  *                 oven's own audible chime) - state flips 1->2 in the very next
  *                 record at the same instant. flag=0x10 seen once, much earlier,
- *                 meaning unconfirmed.
+ *                 meaning unconfirmed. CONFIRMED 2026-08-25: flag=0x0d fires when the
+ *                 standalone kitchen timer (see 0xF043 below) elapses naturally -
+ *                 fired ~10.0s after a 10s kitchen timer was set via the app, to the
+ *                 millisecond. Does NOT fire when the timer is dismissed early via the
+ *                 stop command below (confirmed: a live 70s timer stopped ~55s in via
+ *                 0xF043 sec=0/min=0 produced no 0x4072 at all) - it's specifically an
+ *                 "elapsed" signal, not a general "timer no longer active" one.
  *   0x40 0x00  – ack/response - CONFIRMED 2026-08-12 as the device's ack for any
  *                 0xF0-family command (see below), echoing that command's cmd2 byte
  *                 back as its 1-byte payload
@@ -52,6 +58,24 @@ import log from '@/util/logging'
  *                 below builds this for any (func, temp, minutes). Only these two
  *                 functions are confirmed - others (steam-proof, grill, etc.) may
  *                 use different <func> values we haven't captured yet.
+ *   0xF0 0x43  – (second, unrelated payload shape) set/start/stop a standalone
+ *                 kitchen timer, independent of any cook. CONFIRMED 2026-08-25 from
+ *                 two live sets via the app (10s, then separately 1min10s) and a
+ *                 live early stop: payload `23 06 <sec> <min> 00 80 80 80 00 00` (10
+ *                 data bytes - the oven dispatches on the leading byte/length rather
+ *                 than reusing the 17-byte cook-start shape above). <sec> (offset 2)
+ *                 and <min> (offset 3) are SEPARATE bytes (0-59 each, not one
+ *                 combined value) - confirmed by the second sample (sec=10,min=1)
+ *                 counting down from a real 1:10, tracked live in the state record
+ *                 (see [28..30] below). Sending sec=0/min=0 while a timer is running
+ *                 STOPS/DISMISSES it - CONFIRMED live: the record's countdown, which
+ *                 had been ticking down normally, snapped straight to 0:00 the moment
+ *                 this command was received, well before it would have reached zero
+ *                 on its own. A prior byte-4 "hours" slot is plausible (mirrors the
+ *                 record's [30]) but untested - always 0x00 in every sample so far.
+ *                 The `80 80 80` run at offsets 5-7 is still unexplained (constant
+ *                 across every sample). Acked the same way as any other 0xF0-family
+ *                 command (0x4000, echoing 0x43).
  *   0xF0 0x44  – stop the current cook. CONFIRMED 2026-08-12: payload is a single
  *                 0x00 byte.
  *   0xF0 0xED  – capability-list push, normally sent by the cloud automatically in
@@ -136,7 +160,19 @@ import log from '@/util/logging'
  *                        no change anywhere in this record or any new packet, same
  *                        as the light - neither appears to round-trip through this
  *                        protocol at all.
- *   [28..30] 00…        constant
+ *   [28]     kt_sec     kitchen-timer remaining seconds - CORRECTED 2026-08-25, was
+ *                        wrongly listed as "constant": a live 1min10s kitchen timer
+ *                        (set via 0xF043, see above) counted this down in lockstep
+ *                        with [29], completely independent of the cook fields at
+ *                        [16..20] (a background cook was running the whole time and
+ *                        its own timer fields never moved). Snaps straight to 0 the
+ *                        instant a stop command (sec=0/min=0) is received, rather
+ *                        than a normal ~1/sec decrement.
+ *   [29]     kt_min     kitchen-timer remaining minutes - CONFIRMED 2026-08-25
+ *                        alongside [28]: held at 1 while [28] counted down 10->02,
+ *                        dropped to 0 the instant [28] rolled over 02->59.
+ *   [30]     kt_hours   kitchen-timer remaining hours - unconfirmed, always 0 in
+ *                        every sample so far (no test exceeded 1h9min).
  *   [31]     amb_temp   ambient/residual thermistor reading (retained even when off);
  *                       decays toward true room temp after a cook (e.g. 30 right after
  *                       a 30°C cook stops, cooling to 19, then 17 during a longer idle)
@@ -169,6 +205,15 @@ import log from '@/util/logging'
  *   and state flips 1->2 in the same instant - state=2 here means "at temperature",
  *   not "air fry" as in the second lifecycle; it's a shared preheat/cook phase
  *   marker, and `mode` is what actually identifies the function.
+ *
+ * Fifth lifecycle (2026-08-25, standalone kitchen timer, set live via the app while a
+ * cook was already running in the background): a 10s timer produced no visible record
+ * change at all (only the 0xF043 ack and, ~10s later, the 0x4072 flag=0x0d event) - but
+ * a second, longer 1min10s timer proved that was a sampling gap, not a real absence:
+ * [28]/[29] counted it down from 1:10 to 0:16 across several records while every cook
+ * field ([16..20], mode, set_temp, cur_temp) stayed completely unaffected, then
+ * snapped straight to 0:00 the instant a stop command (sec=0/min=0) was sent - well
+ * before it would have reached zero naturally. No 0x4072 fired for that early stop.
  */
 
 // Cooking functions confirmed for the 0xF0 0x43 command's <func> byte (offset 2) -
@@ -203,6 +248,12 @@ const START_COOKING_TEMPLATE: (number | null)[] = [
 ]
 const STOP = 'F04400'
 
+// Fixed bytes of the standalone kitchen-timer 0xF0 0x43 payload - a different shape
+// from START_COOKING_TEMPLATE above, confirmed live for 10s and 1min10s samples (see
+// the doc note on 0xF0 0x43). The two `null`s are seconds and minutes, in that order.
+// Sending both as 0 stops/dismisses a running timer.
+const KITCHEN_TIMER_TEMPLATE: (number | null)[] = [0x23, 0x06, null, null, 0x00, 0x80, 0x80, 0x80, 0x00, 0x00]
+
 // Confirmed live 2026-08-12 to make the oven send back a fresh 0x40EB state
 // snapshot without starting a cook - see the 0xF0 0xED doc note above.
 const REFRESH_QUERY = 'F0ED114101000000181A1017181C272E2F33505356595C00000000000000000000000000'
@@ -223,6 +274,9 @@ export default class Device extends HADevice {
     private curTemp: number = 0
     private ambTemp: number = 0
     private door: boolean = false
+    private kitchenTimerSec: number = 0
+    private kitchenTimerMin: number = 0
+    private kitchenTimerHours: number = 0
 
     // Keepalive bookkeeping: CONFIRMED live 2026-08-12 that pinging on a fixed
     // interval does NOT keep the appliance's WiFi awake - it went to sleep on its
@@ -243,6 +297,11 @@ export default class Device extends HADevice {
     private startTemp: number = 200
     private startMinutes: number = 15
 
+    // Staged kitchen-timer duration (total seconds), settable from HA before pressing
+    // Start. Defaults to the first confirmed sample (10s) - see the 0xF0 0x43
+    // kitchen-timer doc note.
+    private kitchenTimerDuration: number = 10
+
     private lastStatus: string = ''
     private lastRemaining: number = -1
     private lastSetMin: number = -1
@@ -250,6 +309,7 @@ export default class Device extends HADevice {
     private lastCurTemp: number = -1
     private lastAmbTemp: number = -1
     private lastDoor: boolean | undefined = undefined
+    private lastKitchenTimerRemaining: number = -1
 
     constructor(
         HA: Connection,
@@ -384,6 +444,55 @@ export default class Device extends HADevice {
                     device_class: 'door',
                     state_topic: '$this/door-',
                 },
+                kitchen_timer_duration: {
+                    platform: 'number',
+                    unique_id: '$deviceid-kitchen-timer-duration',
+                    name: 'Kitchen timer duration',
+                    icon: 'mdi:timer-plus-outline',
+                    unit_of_measurement: 's',
+                    // Seconds and minutes are separate bytes on the wire (see 0xF0
+                    // 0x43 kitchen-timer doc note), so up to 59:59 is representable -
+                    // only 10s and 1:10 are actually confirmed samples.
+                    min: 1,
+                    max: 3599,
+                    step: 1,
+                    state_topic: '$this/kitchen_timer_duration-',
+                    command_topic: '$this/kitchen_timer_duration/set',
+                },
+                kitchen_timer_start: {
+                    platform: 'button',
+                    unique_id: '$deviceid-kitchen-timer-start',
+                    name: 'Start kitchen timer',
+                    icon: 'mdi:timer-outline',
+                    command_topic: '$this/kitchen_timer_start/set',
+                    payload_press: '',
+                },
+                kitchen_timer_cancel: {
+                    platform: 'button',
+                    unique_id: '$deviceid-kitchen-timer-cancel',
+                    name: 'Cancel kitchen timer',
+                    icon: 'mdi:timer-off-outline',
+                    command_topic: '$this/kitchen_timer_cancel/set',
+                    payload_press: '',
+                },
+                kitchen_timer_remaining: {
+                    platform: 'sensor',
+                    unique_id: '$deviceid-kitchen-timer-remaining',
+                    name: 'Kitchen timer remaining',
+                    icon: 'mdi:timer-sand',
+                    device_class: 'duration',
+                    unit_of_measurement: 's',
+                    state_class: 'measurement',
+                    state_topic: '$this/kitchen_timer_remaining-',
+                },
+                kitchen_timer_finished: {
+                    platform: 'event',
+                    unique_id: '$deviceid-kitchen-timer-finished',
+                    name: 'Kitchen timer finished',
+                    icon: 'mdi:timer-check-outline',
+                    event_types: ['finished'],
+                    state_topic: '$this/kitchen_timer_finished-',
+                },
             },
         })
 
@@ -391,6 +500,7 @@ export default class Device extends HADevice {
         this.HA.publishProperty(this.id, 'start_function-', this.startFunction)
         this.HA.publishProperty(this.id, 'start_temperature-', this.startTemp)
         this.HA.publishProperty(this.id, 'start_duration-', this.startMinutes)
+        this.HA.publishProperty(this.id, 'kitchen_timer_duration-', this.kitchenTimerDuration)
 
         this.refreshInterval = setInterval(() => this.sendKeepalive(), KEEPALIVE_INTERVAL_MS)
     }
@@ -434,6 +544,22 @@ export default class Device extends HADevice {
             this.processRecord(data.subarray(0, 115))
         } else if (cmd === 0x40ec && data.length >= 230) {
             this.processRecord(data.subarray(115, 230))
+        } else if (cmd === 0x4072 && data.length >= 13) {
+            this.processEvent(data)
+        }
+    }
+
+    private processEvent(data: Buffer) {
+        const flag = data[1]
+        if (flag === 0x0d) {
+            // Kitchen timer elapsed naturally - see the 0x4072 doc note above. Not
+            // retained: each firing is a discrete event, not a persistent state.
+            log('event', this.id, 'kitchen timer finished')
+            this.HA.publishProperty(this.id, 'kitchen_timer_finished-', JSON.stringify({ event_type: 'finished' }), {
+                retain: false,
+            })
+        } else {
+            log('event', this.id, `unhandled 0x4072 event flag=0x${flag.toString(16)}`)
         }
     }
 
@@ -449,12 +575,15 @@ export default class Device extends HADevice {
         this.setTemp = r[22]
         this.curTemp = r[24]
         this.door = (r[27] & 0x04) !== 0
+        this.kitchenTimerSec = r[28]
+        this.kitchenTimerMin = r[29]
+        this.kitchenTimerHours = r[30]
         this.ambTemp = r[31]
 
         log(
             'status',
             this.id,
-            `state=${this.state} remaining=${this.hours}h${this.minutes}m${this.seconds}s setMin=${this.setHours}h${this.setMin}m setTemp=${this.setTemp} curTemp=${this.curTemp}`,
+            `state=${this.state} remaining=${this.hours}h${this.minutes}m${this.seconds}s setMin=${this.setHours}h${this.setMin}m setTemp=${this.setTemp} curTemp=${this.curTemp} kitchenTimer=${this.kitchenTimerHours}h${this.kitchenTimerMin}m${this.kitchenTimerSec}s`,
         )
         this.publishState()
     }
@@ -472,10 +601,18 @@ export default class Device extends HADevice {
         return this.setHours * 60 + this.setMin
     }
 
+    // Total seconds remaining on the standalone kitchen timer - see [28..30] in the
+    // doc header. Independent of computeRemaining()/computeSetDuration() above, which
+    // only cover the cook timer.
+    private computeKitchenTimerRemaining(): number {
+        return this.kitchenTimerHours * 3600 + this.kitchenTimerMin * 60 + this.kitchenTimerSec
+    }
+
     private publishState() {
         const status = this.computeStatus()
         const remaining = this.computeRemaining()
         const setDuration = this.computeSetDuration()
+        const kitchenTimerRemaining = this.computeKitchenTimerRemaining()
 
         if (
             status === this.lastStatus &&
@@ -484,7 +621,8 @@ export default class Device extends HADevice {
             this.setTemp === this.lastSetTemp &&
             this.curTemp === this.lastCurTemp &&
             this.ambTemp === this.lastAmbTemp &&
-            this.door === this.lastDoor
+            this.door === this.lastDoor &&
+            kitchenTimerRemaining === this.lastKitchenTimerRemaining
         )
             return
 
@@ -495,6 +633,7 @@ export default class Device extends HADevice {
         this.lastCurTemp = this.curTemp
         this.lastAmbTemp = this.ambTemp
         this.lastDoor = this.door
+        this.lastKitchenTimerRemaining = kitchenTimerRemaining
 
         this.HA.publishProperty(this.id, 'status-', status)
         this.HA.publishProperty(this.id, 'remaining-', remaining)
@@ -503,6 +642,7 @@ export default class Device extends HADevice {
         if (this.curTemp > 0) this.HA.publishProperty(this.id, 'temperature-', this.curTemp)
         if (this.ambTemp > 0) this.HA.publishProperty(this.id, 'ambient_temperature-', this.ambTemp)
         this.HA.publishProperty(this.id, 'door-', this.door ? 'ON' : 'OFF')
+        this.HA.publishProperty(this.id, 'kitchen_timer_remaining-', kitchenTimerRemaining)
     }
 
     setProperty(prop: string, value: string) {
@@ -521,6 +661,13 @@ export default class Device extends HADevice {
             this.send(this.buildStartCommand(this.startFunction, this.startTemp, this.startMinutes))
         } else if (prop === 'stop') {
             this.send(Buffer.from(STOP, 'hex'))
+        } else if (prop === 'kitchen_timer_duration') {
+            this.kitchenTimerDuration = Number(value)
+            this.HA.publishProperty(this.id, 'kitchen_timer_duration-', this.kitchenTimerDuration)
+        } else if (prop === 'kitchen_timer_start') {
+            this.send(this.buildKitchenTimerCommand(this.kitchenTimerDuration))
+        } else if (prop === 'kitchen_timer_cancel') {
+            this.send(this.buildKitchenTimerCommand(0))
         }
     }
 
@@ -534,6 +681,20 @@ export default class Device extends HADevice {
             if (b !== null) return b
             if (i === 2) return COOKING_FUNCTIONS[func]
             return i === 8 ? tempC & 0xff : minutes & 0xff
+        })
+        return Buffer.concat([Buffer.from([0xf0, 0x43]), Buffer.from(data)])
+    }
+
+    // Builds the standalone-kitchen-timer 0xF0 0x43 command (a different payload
+    // shape from buildStartCommand() above - see the doc note on 0xF0 0x43) from a
+    // total duration in seconds, split into separate seconds/minutes bytes.
+    // totalSeconds=0 stops/dismisses a running timer.
+    private buildKitchenTimerCommand(totalSeconds: number): Buffer {
+        const sec = totalSeconds % 60
+        const min = Math.floor(totalSeconds / 60) % 60
+        const data = KITCHEN_TIMER_TEMPLATE.map((b, i) => {
+            if (b !== null) return b
+            return i === 2 ? sec : min
         })
         return Buffer.concat([Buffer.from([0xf0, 0x43]), Buffer.from(data)])
     }
